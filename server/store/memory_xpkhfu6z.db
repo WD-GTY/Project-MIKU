@@ -1,0 +1,162 @@
+[
+  {
+    "id": "09362639-5fab-4cf8-a902-02680f782d83",
+    "type": "avatar_model",
+    "content": "yinlang",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788420662410,
+    "createdAt": 1788420662410
+  },
+  {
+    "id": "3a8a6790-5148-4fdd-8987-a57c567f1c52",
+    "type": "avatar_model",
+    "content": "senko",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421067537,
+    "createdAt": 1788421067537
+  },
+  {
+    "id": "583abe55-ac47-4a60-81fe-1571c169b8bc",
+    "type": "avatar_model",
+    "content": "haru",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421072191,
+    "createdAt": 1788421072191
+  },
+  {
+    "id": "59642165-fb21-4ae1-a78a-1f3cc1eef834",
+    "type": "avatar_model",
+    "content": "senko",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421077387,
+    "createdAt": 1788421077387
+  },
+  {
+    "id": "742427e3-8ab9-4cd9-8dc0-d0b6591dcc78",
+    "type": "avatar_model",
+    "content": "haru",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421080958,
+    "createdAt": 1788421080958
+  },
+  {
+    "id": "118e1d85-7e63-4a70-afad-94b0f8b041fa",
+    "type": "avatar_model",
+    "content": "yinlang",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421145900,
+    "createdAt": 1788421145900
+  },
+  {
+    "id": "d0b5a99f-f2c2-4fd2-ba18-830e226032d0",
+    "type": "avatar_model",
+    "content": "haru",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421530050,
+    "createdAt": 1788421530050
+  },
+  {
+    "id": "01378116-6f76-4aab-b68c-ba5221e3532f",
+    "type": "avatar_model",
+    "content": "yinlang",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421537114,
+    "createdAt": 1788421537114
+  },
+  {
+    "id": "c11b6e1b-18d0-46dd-9c05-e8f4ee829317",
+    "type": "avatar_model",
+    "content": "senko",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421565956,
+    "createdAt": 1788421565956
+  },
+  {
+    "id": "6e3de901-4e50-495f-99f0-e2854b9e7e89",
+    "type": "avatar_model",
+    "content": "haru",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421571771,
+    "createdAt": 1788421571771
+  }
+]

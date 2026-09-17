@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI 컴페니언 - 학습 메이트</title>
+  <script src="/vendor/pixi.min.js"></script>
+  <script src="/vendor/live2dcubismcore.min.js"></script>
+  <script src="/vendor/cubism4.min.js"></script>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">🦊 AI 컴페니언</div>
+      <div id="status-badge" class="status idle">대기 중</div>
+    </header>
+
+    <main class="layout">
+      <!-- 아바타 스테이지 -->
+      <section class="stage">
+        <canvas id="avatar-canvas"></canvas>
+        <div id="stage-overlay">
+          <select id="avatar-select" title="아바타 모델 선택"></select>
+          <button id="btn-tap" title="때리기(놀리기)">👆 건드리기</button>
+          <button id="btn-recenter" title="아바타 위치/크기 초기화">🎯</button>
+          <span class="zoom-box" title="아바타 크기">
+            <span>🔍</span>
+            <input id="avatar-zoom" type="range" min="30" max="250" step="1" value="100" />
+            <span id="avatar-zoom-label">100%</span>
+          </span>
+        </div>
+      </section>
+
+      <!-- 사이드 패널 -->
+      <aside class="side" id="side-panel">
+        <!-- 대화 패널 -->
+        <section class="panel chat-panel" data-panel="chat" style="flex-grow:3">
+          <header onclick="togglePanel(this.parentElement)">
+            <h2>대화</h2>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span id="conn-state" class="conn-state">연결 안 됨</span>
+              <span class="toggle-icon">▼</span>
+            </div>
+          </header>
+          <div class="panel-body">
+            <div id="chat-log" class="chat-log"></div>
+            <form id="chat-form" class="chat-form" autocomplete="off">
+              <input id="chat-input" type="text" placeholder="공부 질문을 입력하거나 마이크로 말해보세요..." />
+              <button id="btn-mic" type="button" title="음성 입력">🎤</button>
+              <button type="submit">전송</button>
+            </form>
+          </div>
+        </section>
+
+        <div class="resize-handle" data-resize="chat-goal"></div>
+
+        <!-- 목표 패널 -->
+        <section class="panel goal-panel" data-panel="goal" style="flex-grow:1">
+          <header onclick="togglePanel(this.parentElement)">
+            <h2>오늘의 목표</h2>
+            <span class="toggle-icon">▼</span>
+          </header>
+          <div class="panel-body">
+            <div id="goal-current" class="goal-current"></div>
+            <form id="goal-form" class="goal-form">
+              <input id="goal-input" type="text" placeholder="예: 미분의 연쇄법칙 마스터하기" />
+              <button type="submit">설정</button>
+            </form>
+          </div>
+        </section>
+
+        <div class="resize-handle" data-resize="goal-material"></div>
+
+        <!-- 학습 자료 패널 -->
+        <section class="panel material-panel" data-panel="material" style="flex-grow:1">
+          <header onclick="togglePanel(this.parentElement)">
+            <h2>학습 자료 (RAG)</h2>
+            <span class="toggle-icon">▼</span>
+          </header>
+          <div class="panel-body">
+            <form id="upload-form" class="upload-form">
+              <input id="upload-file" type="file" accept=".pdf,.txt,.md" />
+              <button type="submit">업로드</button>
+            </form>
+            <div id="material-list" class="material-list"></div>
+            <div class="debug-row">
+              <input id="rag-query" type="text" placeholder="자료에서 검색 (테스트)" />
+              <button id="btn-rag-search" type="button">검색</button>
+            </div>
+            <div id="rag-results" class="rag-results"></div>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    // 패널 토글 (접기/펼치기)
+    function togglePanel(panel) {
+      panel.classList.toggle('collapsed');
+    }
+
+    // 섹션 리사이즈 드래그
+    document.querySelectorAll('.resize-handle').forEach(handle => {
+      let startY, startFlexA, startFlexB, panelA, panelB;
+
+      handle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        startY = e.clientY;
+        const side = document.getElementById('side-panel');
+        const panels = [...side.querySelectorAll('.panel')];
+        const idx = panels.indexOf(handle.previousElementSibling) !== -1
+          ? panels.indexOf(handle.previousElementSibling)
+          : panels.indexOf(handle.nextElementSibling);
+
+        // 리사이즈 핸들 기준 위/아래 패널 찾기
+        let prevEl = handle;
+        while (prevEl && !prevEl.classList?.contains('panel')) prevEl = prevEl.previousElementSibling;
+        let nextEl = handle;
+        while (nextEl && !nextEl.classList?.contains('panel')) nextEl = nextEl.nextElementSibling;
+
+        panelA = prevEl;
+        panelB = nextEl;
+
+        if (!panelA || !panelB) return;
+
+        startFlexA = parseFloat(panelA.style.flexGrow) || 1;
+        startFlexB = parseFloat(panelB.style.flexGrow) || 1;
+
+        document.addEventListener('mousemove', onDrag);
+        document.addEventListener('mouseup', onDragEnd);
+        document.body.style.cursor = 'ns-resize';
+        document.body.style.userSelect = 'none';
+      });
+
+      function onDrag(e) {
+        if (!panelA || !panelB) return;
+        const side = document.getElementById('side-panel');
+        const totalHeight = side.clientHeight;
+        const delta = e.clientY - startY;
+        const deltaRatio = (delta / totalHeight) * 6;
+
+        const newA = Math.max(0.3, startFlexA + deltaRatio);
+        const newB = Math.max(0.3, startFlexB - deltaRatio);
+
+        panelA.style.flexGrow = newA;
+        panelB.style.flexGrow = newB;
+      }
+
+      function onDragEnd() {
+        document.removeEventListener('mousemove', onDrag);
+        document.removeEventListener('mouseup', onDragEnd);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    });
+  </script>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

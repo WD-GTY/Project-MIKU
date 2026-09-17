@@ -1,0 +1,18 @@
+[
+  {
+    "id": "8917ed9a-2e63-4ab0-95ad-cae0fbd4c8be",
+    "type": "avatar_model",
+    "content": "senko",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421310261,
+    "createdAt": 1788421310261
+  }
+]

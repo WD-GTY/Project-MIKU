@@ -1,0 +1,30 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "银狼.moc3",
+		"Textures": [
+			"银狼.4096/texture_00.png",
+			"银狼.4096/texture_01.png",
+			"银狼.4096/texture_02.png",
+			"银狼.4096/texture_03.png",
+			"银狼.4096/texture_04.png"
+		],
+		"Physics": "银狼.physics3.json",
+		"DisplayInfo": "银狼.cdi3.json"
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		}
+	]
+}

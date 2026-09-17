@@ -1,0 +1,32 @@
+[
+  {
+    "id": "cda19de3-d7e5-479d-910f-bd375601d8d5",
+    "type": "goal",
+    "content": "곱하기 마스터 하기",
+    "tags": [
+      "목표"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "today_goal"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1787811991498,
+    "createdAt": 1787811991498
+  },
+  {
+    "id": "be927edb-dee7-4690-a35e-978283cea7cc",
+    "type": "weak_concept",
+    "content": "헷갈리는 개념: 음 잘 모르겠는데",
+    "tags": [
+      "취약개념"
+    ],
+    "importance": 3.5,
+    "mastered": false,
+    "meta": {},
+    "accessCount": 0,
+    "lastAccessAt": 1787812034283,
+    "createdAt": 1787812034283
+  }
+]

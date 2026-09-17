@@ -1,0 +1,18 @@
+[
+  {
+    "id": "b19cef24-5039-40b9-8ace-66a91d6c421f",
+    "type": "avatar_model",
+    "content": "yinlang",
+    "tags": [
+      "아바타"
+    ],
+    "importance": 5,
+    "mastered": false,
+    "meta": {
+      "kind": "avatar_model"
+    },
+    "accessCount": 0,
+    "lastAccessAt": 1788421310246,
+    "createdAt": 1788421310246
+  }
+]
