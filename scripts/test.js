@@ -1,14 +1,31 @@
 // 통합/유닛 테스트: API 키 없이 mock으로 전체 파이프라인을 검증합니다.
+// 테스트는 항상 mock 프로바이더를 사용하도록 환경을 강제합니다.
+// ES 모듈에서 static import 전에 env를 설정하려면 dynamic import가 필요합니다.
+process.env.LLM_PROVIDER = 'mock';
+process.env.TTS_PROVIDER = 'mock';
+process.env.STT_PROVIDER = 'mock';
+
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getRuntime } from '../server/providers/index.js';
-import { ShortTermMemory } from '../server/memory/shortTerm.js';
-import { LongTermMemory } from '../server/memory/longTerm.js';
-import { Pipeline } from '../server/core/pipeline.js';
-import { SentenceChunker } from '../server/core/sentenceChunker.js';
-import { chunkText } from '../server/rag/ingest.js';
+
+const {
+  getRuntime,
+  ShortTermMemory,
+  LongTermMemory,
+  Pipeline,
+  SentenceChunker,
+  chunkText,
+} = await (async () => {
+  const providers = await import('../server/providers/index.js');
+  const shortTerm = await import('../server/memory/shortTerm.js');
+  const longTerm = await import('../server/memory/longTerm.js');
+  const pipeline = await import('../server/core/pipeline.js');
+  const chunker = await import('../server/core/sentenceChunker.js');
+  const rag = await import('../server/rag/ingest.js');
+  return { ...providers, ...shortTerm, ...longTerm, ...pipeline, ...chunker, ...rag };
+})();
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'project-miku-test-'));
 

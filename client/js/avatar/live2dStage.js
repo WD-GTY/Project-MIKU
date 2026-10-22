@@ -363,7 +363,7 @@ export class Live2DStage {
 
     // 거리 기반 강도 (가까울수록 강함)
     const dist = Math.hypot(dx, dy);
-    constproximity = Math.max(0, 1 - dist / (maxDist * 0.6));
+    const proximity = Math.max(0, 1 - dist / (maxDist * 0.6));
     this._trackIntensity = approach(this._trackIntensity, proximity, sec * 4);
 
     // 목표 각도 (커서 방향으로 고개 돌리기, 최대 ±30도)

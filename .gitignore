@@ -1,8 +1,10 @@
 node_modules/
 .env
 server/store/memory.db
+server/store/memory_*.db
 server/store/materials/
 server/store/chroma/
 client/assets/models/live2d/
 client/vendor/
 *.log
+_rmtest/

@@ -43,6 +43,26 @@ if %errorlevel%==0 (
   exit /b 0
 )
 
+netstat -ano | findstr :11434 >nul 2>&1
+if %errorlevel%==0 (
+  echo [Ollama] Already running on :11434 - reusing.
+) else (
+  where ollama >nul 2>&1
+  if %errorlevel%==0 (
+    echo [Ollama] Starting ollama serve...
+    start "Ollama Server" /min ollama serve
+    ping -n 4 127.0.0.1 >nul
+  ) else (
+    if exist "%LOCALAPPDATA%\Programs\Ollama\ollama.exe" (
+      echo [Ollama] Starting ollama serve...
+      start "Ollama Server" /min "%LOCALAPPDATA%\Programs\Ollama\ollama.exe" serve
+      ping -n 4 127.0.0.1 >nul
+    ) else (
+      echo [Ollama] ollama not found - skipping.
+    )
+  )
+)
+
 set "CHROMA_MINE="
 netstat -ano | findstr :8000 >nul 2>&1
 if %errorlevel%==0 (

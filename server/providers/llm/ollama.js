@@ -1,15 +1,22 @@
 import { LLMProvider } from './index.js';
 
-const DEFAULT_BASE_URL = 'http://localhost:11434';
+const DEFAULT_BASE_URL = 'http://127.0.0.1:11434';
 
 export class OllamaLLMProvider extends LLMProvider {
-  constructor({ baseUrl = DEFAULT_BASE_URL, model = 'qwen3:14b' } = {}) {
+  constructor({
+    baseUrl = DEFAULT_BASE_URL,
+    model = 'qwen3:14b',
+    think = process.env.OLLAMA_THINK === 'true',
+  } = {}) {
     super();
-    this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.baseUrl = baseUrl.replace(/\/+$/, '').replace('://localhost:', '://127.0.0.1:');
     this.model = model;
+    this.think = think;
+    this._initialized = false;
   }
 
   async init() {
+    if (this._initialized) return;
     const res = await fetch(`${this.baseUrl}/api/tags`);
     if (!res.ok) throw new Error(`올라마 서버 연결 실패 (${res.status}): ${this.baseUrl}`);
     const data = await res.json();
@@ -17,7 +24,8 @@ export class OllamaLLMProvider extends LLMProvider {
     if (!names.some((n) => n.startsWith(this.model))) {
       console.warn(`[ollama] 모델 "${this.model}" 이(가) 설치되어 있지 않습니다. 사용 가능: ${names.join(', ')}`);
     }
-    console.log(`[ollama] 연결 성공 – 모델: ${this.model}`);
+    this._initialized = true;
+    console.log(`[ollama] 연결 성공 – 모델: ${this.model} (${this.baseUrl})`);
   }
 
   async *streamChat({ messages }) {
@@ -28,6 +36,7 @@ export class OllamaLLMProvider extends LLMProvider {
         model: this.model,
         messages,
         stream: true,
+        think: this.think,
       }),
     });
 

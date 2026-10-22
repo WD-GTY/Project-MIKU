@@ -9,6 +9,88 @@ import { config } from '../config.js';
 const EMOTION_TAG = /^\s*\[([a-zA-Z_]+)\]/;
 const TAG_PREFIX = /^\s*\[?[a-zA-Z_]*$/;
 
+// ---- 도구 호출 시스템 ----
+const VALID_TOOLS = new Set(['open_explanation','close_explanation','set_emotion','set_tone','search_rag','set_goal']);
+const TONE_MAP = { casual:'친근한 구어체로', formal:'조금 격식있는 말투로', concise:'짧고 간결하게', detailed:'자세하고 풍부하게' };
+const TOOL_TAG_RE = /\[TOOL:(\w+)\]/g;
+
+/**
+ * 텍스트에서 완성된 [TOOL:name]{json} 호출을 파싱합니다.
+ * 문자열 내부의 {, }는 깊이 계산에서 제외됩니다.
+ */
+function parseToolCalls(text) {
+  const calls = [];
+  TOOL_TAG_RE.lastIndex = 0;
+  let match;
+  while ((match = TOOL_TAG_RE.exec(text)) !== null) {
+    const name = match[1];
+    if (!VALID_TOOLS.has(name)) continue;
+    const afterTag = text.slice(match.index + match[0].length);
+    if (afterTag[0] !== '{') continue;
+    // 중괄호 깊이 추적 (문자열 내부 제외)
+    let depth = 0, end = -1, inStr = false, esc = false;
+    for (let i = 0; i < afterTag.length; i++) {
+      const ch = afterTag[i];
+      if (esc) { esc = false; continue; }
+      if (ch === '\\') { esc = true; continue; }
+      if (ch === '"') { inStr = !inStr; continue; }
+      if (!inStr) {
+        if (ch === '{') depth++;
+        if (ch === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+      }
+    }
+    if (end === -1) continue; // 미완성
+    try {
+      const args = JSON.parse(afterTag.slice(0, end));
+      calls.push({ name, args, start: match.index, end: match.index + match[0].length + end });
+    } catch { /* JSON 파싱 실패 시 스 */ }
+  }
+  return calls;
+}
+
+/**
+ * 처리된 도구 호출의 [start, end) 범위를 제외한 텍스트를 조립합니다.
+ */
+function buildCleanText(fullText, processedStarts) {
+  if (!processedStarts.size) return fullText;
+  const ranges = [];
+  for (const start of processedStarts) {
+    // start는 TOOL 태그의 시작 위치, end는 parseToolCalls에서 계산
+    // 하지만 Set에는 start만 저장되므로, 다시 파싱하여 end를 찾음
+    TOOL_TAG_RE.lastIndex = 0;
+    let m;
+    while ((m = TOOL_TAG_RE.exec(fullText)) !== null) {
+      if (m.index === start) {
+        const afterTag = fullText.slice(m.index + m[0].length);
+        if (afterTag[0] !== '{') continue;
+        let depth = 0, end = -1, inStr = false, esc = false;
+        for (let i = 0; i < afterTag.length; i++) {
+          const ch = afterTag[i];
+          if (esc) { esc = false; continue; }
+          if (ch === '\\') { esc = true; continue; }
+          if (ch === '"') { inStr = !inStr; continue; }
+          if (!inStr) {
+            if (ch === '{') depth++;
+            if (ch === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
+          }
+        }
+        if (end !== -1) {
+          ranges.push({ start: m.index, end: m.index + m[0].length + end });
+        }
+        break;
+      }
+    }
+  }
+  ranges.sort((a, b) => a.start - b.start);
+  let result = '', lastEnd = 0;
+  for (const r of ranges) {
+    result += fullText.slice(lastEnd, r.start);
+    lastEnd = r.end;
+  }
+  result += fullText.slice(lastEnd);
+  return result;
+}
+
 export class Pipeline {
   /**
    * @param {object} deps
@@ -104,6 +186,8 @@ export class Pipeline {
     let emotion = null;
     let stage = 'head'; // head: 태그 파싱 중 / body: 본문
     let head = '';
+    const processedTools = new Set(); // 매 호출 초기화
+    let lastCleanLen = 0;
 
     for await (const { token } of stream) {
       fullText += token;
@@ -115,10 +199,15 @@ export class Pipeline {
           stage = 'body';
           emotion = m[1];
           this._json({ type: 'emotion', tag: emotion });
+          // fullText에서 감정 태그 제거 → body 단계에서 정제 텍스트가 태그를 포함하지 않음
+          fullText = fullText.slice(m[0].length);
           const leftover = combined.slice(m[0].length);
           if (leftover) {
             this._showText(leftover);
             chunker.push(leftover);
+            lastCleanLen = leftover.length;
+          } else {
+            lastCleanLen = 0;
           }
         } else if (TAG_PREFIX.test(combined) && combined.length < 32) {
           head = combined; // 태그로 시작될 가능성이 있어 대기
@@ -127,12 +216,28 @@ export class Pipeline {
           emotion = 'neutral';
           this._showText(combined);
           chunker.push(combined);
+          lastCleanLen = combined.length;
         }
         continue;
       }
 
-      this._showText(token);
-      chunker.push(token);
+      // body 단계: 도구 호출 스캔 + 정제 텍스트 전송
+      const calls = parseToolCalls(fullText);
+      for (const call of calls) {
+        if (!processedTools.has(call.start)) {
+          processedTools.add(call.start);
+          this._handleToolCall(call.name, call.args);
+        }
+      }
+
+      // 정제 텍스트 빌드: 처리된 도구 호출 제거
+      const cleanText = buildCleanText(fullText, processedTools);
+      const newPart = cleanText.slice(lastCleanLen);
+      if (newPart) {
+        this._showText(newPart);
+        chunker.push(newPart);
+        lastCleanLen = cleanText.length;
+      }
     }
 
     // 스트림이 태그 도중에 끝난 경우 남은 head를 표시
@@ -141,7 +246,30 @@ export class Pipeline {
       chunker.push(head);
     }
 
+    // 스트림 종료 시 미완료 도구 호출 재처리
+    const finalCalls = parseToolCalls(fullText);
+    for (const call of finalCalls) {
+      if (!processedTools.has(call.start)) {
+        this._handleToolCall(call.name, call.args);
+      }
+    }
+
     return { text: fullText, emotion };
+  }
+
+  _handleToolCall(name, args) {
+    if (name === 'set_tone') {
+      // 서버 내부 처리: 톤 오버라이드 저장 (클라이언트 미전송)
+      this.toneOverride = TONE_MAP[args?.style] || null;
+      return;
+    }
+    if (!VALID_TOOLS.has(name)) {
+      // 미등록 도구: 경고
+      this._json({ type: 'notice', text: '알 수 없는 도구: ' + name });
+      return;
+    }
+    // 나머지 도구는 클라이언트로 방출
+    this._json({ type: 'tool_call', name, args });
   }
 
   _showText(text) {

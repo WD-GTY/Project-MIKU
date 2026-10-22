@@ -1,7 +1,8 @@
 # AI 컴페니언 아키텍처
 
 학습용 친근한 어시스턴트 + 커스텀 Live2D 아바타.
-LLM/STT/TTS는 **Provider 인터페이스**로 분리되어 있으며, 현재는 mock으로 전체 파이프라인이 동작합니다.
+LLM/STT/TTS는 **Provider 인터페이스**로 분리되어 있으며, 기본값으로 Ollama(LLM) · Edge TTS · Whisper(STT)가 활성화되어 있습니다.
+프로바이더 로드/연결 실패 시 자동으로 mock으로 폴백하므로 서버는 항상 기동됩니다.
 
 ## 구조
 
@@ -10,6 +11,7 @@ server/                        # Node.js (Express + ws)
 ├── index.js                   # 정적 서빙 + 업로드 API + 엔트리
 ├── config.js                  # 환경 설정 (.env)
 ├── ws/hub.js                  # WebSocket 라우팅
+├── core/sessions.js           # 세션 ID 검증(경로 조작 방지) + 세션별 장기 기억 캐시
 ├── core/sentenceChunker.js    # 구두점(.!?) 기준 청크 + 타임아웃 플러시
 ├── core/pipeline.js           # LLM 스트림 → 청크 → TTS 큐 → 클라이언트
 ├── providers/                 # LLM / TTS / STT / Embedding 인터페이스 + 구현
@@ -38,7 +40,8 @@ client/                        # 순수 HTML/JS (빌드 도구 불필요)
 ## 파이프라인
 
 ```
-음성(마이크) ──dev──▶ Web Speech API ──▶ user_text (WS)
+음성(마이크) ──▶ 마이크 PCM(16kHz Int16) ──WS 바이너리──▶ 서버 Whisper ──▶ user_text
+              └──(mock STT / 미지원 브라우저)──▶ Web Speech API ──▶ user_text (WS)
                                    ▼
 [단기 기억]  [장기 기억 recall]   [RAG 검색 ─ Chroma]
               └─────────────┴──────────┴──▶ system prompt
@@ -70,7 +73,9 @@ server/providers/tts/elevenlabs.js →  export default class ... extends TTSProv
 server/providers/stt/whisper.js    →  extends STTProvider (실시간 스트리밍)
 .env: LLM_PROVIDER=openai / TTS_PROVIDER=elevenlabs / STT_PROVIDER=whisper
 ```
-STT 인터페이스는 웹소켓 바이너리(오디오) → 서버 인식 → `user_text` 구조로 확장됩니다. 현재 hub의 바이너리 분기(``isBinary``)가 이 자리입니다.
+STT는 웹소켓 바이너리(마이크 PCM 16kHz Int16) → 서버 Whisper 인식 → `user_text` 구조로 구현되어 있습니다(`hub.js` 의 isBinary 분기).
+서버는 에너지 기반 VAD로 침묵 800ms 를 감지해 발화를 절단하며, TTS 재생 시작 시 클라이언트가 `stt_reset` 을 보내 버퍼를 비웁니다.
+클라이언트는 `GET /api/config` 로 서버 STT 사용 여부를 판단합니다.
 
 ## 아바타
 
@@ -106,8 +111,9 @@ STT 인터페이스는 웹소켓 바이너리(오디오) → 서버 인식 → `
 
 ### 다음 단계 (예정)
 
-- [ ] 실서비스 Provider 교체: LLM(openai) / TTS(elevenlabs) / STT(whisper) — 인터페이스는 이미 분리됨
-- [ ] 웹소켓 바이너리 오디오 → 서버 실시간 STT 루프 구현 (`hub.js` 의 isBinary 분기 확장)
+- [x] 실서비스 Provider 교체: LLM(Ollama) / TTS(Edge TTS) / STT(Whisper) — openai, elevenlabs 등 추가 옵션은 인터페이스 그대로 확장 가능
+- [x] 웹소켓 바이너리 오디오 → 서버 실시간 STT 루프 구현 (`hub.js` 의 isBinary 분기 — Whisper 통합 완료)
+- [x] 세션 ID 화이트리스트 검증(경로 조작 방지) + 세션별 장기 기억 캐시 (`core/sessions.js`)
 - [ ] 실제 학습 데이터/교과서 연동 시작 (업로드 대신 목차 기반 자동 인제스트)
 - [ ] 아바타 감정 표현 품질 튜닝 (모션 우선순위, 표정 blend)
 - [ ] 감정/음성 품질 튜닝, 하드웨어 가속 확인

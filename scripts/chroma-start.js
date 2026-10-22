@@ -40,7 +40,6 @@ if (!chromaCmd) {
 console.log(`[chroma-start] 실행: ${chromaCmd}`);
 const child = spawn(chromaCmd, ['run', '--host', '127.0.0.1', '--port', '8000', '--path', DATA_DIR], {
   stdio: 'inherit',
-  shell: process.platform === 'win32',
 });
 
 child.on('exit', (code) => process.exit(code ?? 0));

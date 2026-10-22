@@ -4,11 +4,10 @@ import { WSClient } from './agent/wsClient.js';
 import { TTSAudioPlayer } from './audio/playback.js';
 import { MicManager } from './audio/micManager.js';
 import { onLipVolume, ensureResumed } from './audio/audioBus.js';
+import { renderMarkdown } from './markdown.js';
 
 const $ = (sel) => document.querySelector(sel);
 
-const statusBadge = $('#status-badge');
-const connState = $('#conn-state');
 const chatLog = $('#chat-log');
 const chatInput = $('#chat-input');
 const micBtn = $('#btn-mic');
@@ -16,16 +15,14 @@ const goalCurrent = $('#goal-current');
 const goalInput = $('#goal-input');
 const materialList = $('#material-list');
 const ragResults = $('#rag-results');
-const statusLabels = {
-  idle: '대기 중',
-  thinking: '생각 중...',
-  speaking: '말하는 중...',
-  listening: '듣는 중...',
-  busy: '잠깐만...',
-};
+const boardBody = $('#board-body');
+const explanationPanel = $('#explanation-panel');
+const explanationContent = $('#explanation-content');
+const explanationTitle = $('#explanation-title');
 
 let curBubble = null;
 let pendingTtsMeta = null;
+let lastRagQuery = null;
 
 // 세션 ID 로드 또는 생성
 let sessionId = localStorage.getItem('agy_session_id');
@@ -47,6 +44,17 @@ async function fetchAvatarModels() {
     return { models: data.models || [], defaultModelId: data.defaultModelId || 'haru' };
   } catch {
     return { models: [], defaultModelId: 'haru' };
+  }
+}
+
+// 서버 프로바이더 설정 조회 (서버 STT 사용 여부 판단용)
+async function fetchServerConfig() {
+  try {
+    const res = await fetch('/api/config');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch {
+    return { providers: {} };
   }
 }
 
@@ -99,20 +107,30 @@ async function boot() {
   currentModelId = await loadSavedAvatarModel(defaultModelId);
 
   const stage = new Live2DStage(document.getElementById('avatar-canvas'));
+  window._stage = stage; // 도구 호출에서 감정 제어용
   onLipVolume((vol) => stage.setLipVolume(vol));
   try {
     await stage.init({ modelId: currentModelId, availableModels: avatarModels });
     currentModelId = stage.modelId || currentModelId;
   } catch (err) {
     console.error(err);
-    setBadge('idle');
     addNotice('아바타 모델을 불러오지 못했습니다. (setup-sample-model 실행 여부 확인)');
   }
   renderAvatarSelect(avatarSelect);
 
+  // 서버 STT(Whisper) 활성 시: Web Speech API 대신 마이크 PCM을 WS로 전송
+  const serverConfig = await fetchServerConfig();
+  const useServerStt = Boolean(serverConfig.providers?.stt) && serverConfig.providers.stt !== 'mock';
   const mic = new MicManager({
     onTranscript: (text) => sendUserText(text),
     onListeningChange: (on) => micBtn.classList.toggle('listening', on),
+    ...(useServerStt
+      ? {
+          mode: 'server',
+          onServerChunk: (buf) => ws.sendBinary(buf),
+          onServerReset: () => ws.send({ type: 'stt_reset' }),
+        }
+      : {}),
   });
 
   const player = new TTSAudioPlayer({
@@ -132,8 +150,8 @@ async function boot() {
       }
       handleMessage(msg, stage);
     },
-    onOpen: () => connState.textContent = '연결됨',
-    onClose: () => connState.textContent = '연결 안 됨',
+    onOpen: () => {},
+    onClose: () => {},
   });
   ws.connect();
   window._ws = ws; // 디버그용
@@ -162,9 +180,10 @@ async function boot() {
     if (!text) return;
     // 로컬 즉시 반영
     localStorage.setItem('agy_goal', text);
-    goalCurrent.textContent = `🎯 ${text}`;
+    updateGoalDisplay(text);
     ws.send({ type: 'set_goal', text });
     goalInput.value = '';
+    closeModal('goal-modal-overlay');
   });
 
   $('#upload-form').addEventListener('submit', async (e) => {
@@ -236,6 +255,13 @@ async function boot() {
     });
   }
 
+  // ---- 드로어 / 모달 바인딩 ----
+  setupDrawer();
+  setupGoalModal();
+
+  // 설명 패널 닫기 버튼
+  $('#btn-close-explanation')?.addEventListener('click', closeExplanationPanel);
+
   // 자동재생 정책 대응: 첫 상호작용 시 오디오 컨텍스트 재개
   document.addEventListener('pointerdown', ensureResumed, { once: true });
 
@@ -254,8 +280,13 @@ async function boot() {
 function handleMessage(msg, stage) {
   switch (msg.type) {
     case 'status':
-      setBadge(msg.state);
       break;
+    case 'user_text': {
+      // 서버 STT로 인식된 발화 — 표시만 하고 재전송하지 않음 (무한 루프 방지)
+      const div = addBubble('user');
+      div.textContent = msg.text || '';
+      break;
+    }
     case 'emotion':
       if (stage) stage.setEmotion(msg.tag);
       break;
@@ -283,19 +314,18 @@ function handleMessage(msg, stage) {
     case 'notice':
       addNotice(msg.text);
       break;
+    case 'tool_call':
+      handleToolCall(msg.name, msg.args);
+      break;
     default:
       break;
   }
 }
 
-function setBadge(state) {
-  const label = statusLabels[state] || statusLabels.idle;
-  statusBadge.textContent = label;
-  statusBadge.className = `status ${state}`;
-}
-
+// ---- 목표 / 자료 / 검색 결과 ----
 function sendUserText(text) {
   window._ws?.send({ type: 'user_text', text });
+  closeExplanationPanel();
   const div = addBubble('user');
   div.textContent = text;
 }
@@ -309,6 +339,7 @@ function addBubble(role) {
 }
 
 function appendAssistant(text) {
+  if (!text || !text.trim()) return; // §11: 빈 텍스트 버블 방지
   if (!curBubble) {
     curBubble = addBubble('assistant');
     curBubble.classList.add('streaming');
@@ -335,24 +366,31 @@ function addNotice(text) {
 }
 
 // ---- 목표 / 자료 / 검색 결과 ----
+function updateGoalDisplay(text) {
+  const label = `🎯 ${text}`;
+  if (goalCurrent) goalCurrent.textContent = label;
+}
+
 async function loadGoal() {
   // 로컬 캐시로 즉시 표시
   const localGoal = localStorage.getItem('agy_goal');
   if (localGoal) {
-    goalCurrent.textContent = `🎯 ${localGoal}`;
+    updateGoalDisplay(localGoal);
   }
   // 서버에서 최신 목표 동기화
   try {
     const res = await fetch(`/api/goal?sessionId=${sessionId}`);
     const data = await res.json();
     if (data.goal?.content) {
-      goalCurrent.textContent = `🎯 ${data.goal.content}`;
+      updateGoalDisplay(data.goal.content);
       localStorage.setItem('agy_goal', data.goal.content);
     } else if (!localGoal) {
-      goalCurrent.textContent = '아직 설정된 목표가 없어요. 왼쪽에서 설정해 보세요!';
+      updateGoalDisplay('');
     }
   } catch {
-    if (!localGoal) goalCurrent.textContent = '목표 로드 실패';
+    if (!localGoal) {
+      if (goalCurrent) goalCurrent.textContent = '목표 로드 실패';
+    }
   }
 }
 
@@ -389,6 +427,102 @@ function renderRagResult(msg) {
 
 function escapeHtml(str) {
   return String(str).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ---- 드로어 (RAG 자료 관리) ----
+function setupDrawer() {
+  const overlay = $('#drawer-overlay');
+  const drawer = $('#material-drawer');
+  const openBtns = [$('#btn-open-materials-2')];
+  const closeBtn = $('#btn-close-materials');
+
+  const open = () => {
+    drawer.classList.add('open');
+    overlay.classList.add('open');
+  };
+  const close = () => {
+    drawer.classList.remove('open');
+    overlay.classList.remove('open');
+  };
+
+  openBtns.forEach(btn => btn?.addEventListener('click', open));
+  closeBtn?.addEventListener('click', close);
+  overlay?.addEventListener('click', close);
+}
+
+// ---- 목표 모달 ----
+function setupGoalModal() {
+  const overlay = $('#goal-modal-overlay');
+  const goalEditBtn = $('#btn-goal-edit');
+  const closeBtn = $('#btn-close-goal');
+
+  const open = () => {
+    overlay.classList.add('open');
+    goalInput?.focus();
+  };
+  const close = () => {
+    overlay.classList.remove('open');
+  };
+
+  goalEditBtn?.addEventListener('click', open);
+  closeBtn?.addEventListener('click', close);
+  overlay?.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+}
+
+function closeModal(overlayId) {
+  const overlay = $(`#${overlayId}`);
+  if (overlay) overlay.classList.remove('open');
+}
+
+// ---- 설명 패널 제어 ----
+function openExplanationPanel(title, content) {
+  boardBody.classList.add('split-mode');
+  explanationPanel.removeAttribute('hidden');
+  if (title) explanationTitle.textContent = title;
+  explanationContent.innerHTML = renderMarkdown(content || '');
+}
+function closeExplanationPanel() {
+  boardBody.classList.remove('split-mode');
+  explanationPanel.setAttribute('hidden', '');
+  explanationContent.innerHTML = '';
+}
+
+// ---- 도구 호출 처리 ----
+const VALID_EMOTION_TAGS = new Set(['smile','think','cheer','sad','wink','neutral','love','focus','proud','fighting','shy','panic','curious','relieved','pout','whisper','sparkle','explain','surprise','joy','angry','sleepy','wakeup','greet','nod','shake','wave','clap','dance','dozeoff','spaceout']);
+
+function handleToolCall(name, args) {
+  switch (name) {
+    case 'open_explanation':
+      openExplanationPanel(args?.title, args?.content);
+      break;
+    case 'close_explanation':
+      closeExplanationPanel();
+      break;
+    case 'set_emotion':
+      if (args?.tag && VALID_EMOTION_TAGS.has(args.tag)) {
+        window._stage?.setEmotion(args.tag);
+      }
+      break;
+    case 'search_rag':
+      if (args?.query) {
+        const now = Date.now();
+        if (!lastRagQuery || lastRagQuery.text !== args.query || now - lastRagQuery.time > 3000) {
+          lastRagQuery = { text: args.query, time: now };
+          window._ws?.send({ type: 'rag_search', query: args.query });
+        }
+      }
+      break;
+    case 'set_goal':
+      if (args?.text) window._ws?.send({ type: 'set_goal', text: args.text });
+      break;
+    case 'set_tone':
+      // 서버 처리, 클라이언트 무시
+      break;
+    default:
+      console.warn('알 수 없는 tool_call:', name);
+  }
 }
 
 boot().catch((err) => {
