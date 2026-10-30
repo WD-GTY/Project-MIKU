@@ -1,24 +1,43 @@
-// 감정 태그 → 아바타 모션/파라미터 매핑.
-// 두 기본 모델(Haru: TapBody 그룹 / Senko: Tap, Taphead 그룹) 모두에서 동작하도록
-// 모션 그룹 후보 목록을 정의하고, 모델에 실제로 존재하는 그룹을 선택합니다.
+// 감정 태그 → 표정/모션 매핑.
+// 파라미터는 이 파일이 직접 쓰지 않고 반환만 한다. (실제 적용은 Live2DStage의 레이어 합성이 전담)
+// 모션은 모델마다 의미가 다르므로 모델별로 명시 등록한 것만 재생한다.
 
 const PARAMS_BY_TAG = {
-  smile: { ParamMouthOpenY: 0.18, ParamBrowLY: 0.1, ParamBrowRY: 0.1 },
-  neutral: { ParamMouthOpenY: 0.04 },
+  smile: {
+    ParamMouthForm: 0.55,
+    ParamMouthOpenY: 0.16,
+    ParamBrowLY: 0.2,
+    ParamBrowRY: 0.2,
+    ParamEyeLSmile: 0.85,
+    ParamEyeRSmile: 0.85,
+    ParamCheek: 0.25,
+  },
+  neutral: {
+    ParamMouthOpenY: 0.04,
+    ParamMouthForm: 0,
+    ParamEyeLSmile: 0,
+    ParamEyeRSmile: 0,
+    ParamCheek: 0,
+    ParamBrowLY: 0,
+    ParamBrowRY: 0,
+  },
   think: {
     ParamAngleZ: -5,
-    ParamEyeLOpen: 0.6,
-    ParamEyeROpen: 0.6,
+    ParamEyeLOpen: 0.65,
+    ParamEyeROpen: 0.65,
     ParamBrowLY: -0.35,
     ParamBrowRY: -0.35,
+    ParamMouthForm: -0.15,
     ParamMouthOpenY: 0.06,
   },
   cheer: {
-    ParamMouthForm: 0.4,
-    ParamMouthOpenY: 0.25,
-    ParamBrowLY: 0.4,
-    ParamBrowRY: 0.4,
-    ParamCheek: 0.3,
+    ParamMouthForm: 0.65,
+    ParamMouthOpenY: 0.26,
+    ParamBrowLY: 0.45,
+    ParamBrowRY: 0.45,
+    ParamEyeLSmile: 0.9,
+    ParamEyeRSmile: 0.9,
+    ParamCheek: 0.45,
   },
   sad: {
     ParamAngleZ: 4,
@@ -26,16 +45,29 @@ const PARAMS_BY_TAG = {
     ParamEyeROpen: 0.45,
     ParamBrowLY: -0.5,
     ParamBrowRY: -0.5,
+    ParamMouthForm: -0.35,
     ParamMouthOpenY: 0.05,
   },
-  wink: { ParamEyeLOpen: 1, ParamEyeROpen: 0.05, ParamMouthForm: 0.3, ParamAngleZ: 2 },
+  wink: {
+    ParamEyeLOpen: 1,
+    ParamEyeLSmile: 0.6,
+    ParamEyeROpen: 0.02,
+    ParamEyeRSmile: 1,
+    ParamMouthForm: 0.45,
+    ParamMouthOpenY: 0.12,
+    ParamCheek: 0.35,
+    ParamAngleZ: 2,
+  },
   love: {
-    ParamEyeLOpen: 0.8,
-    ParamEyeROpen: 0.8,
-    ParamMouthOpenY: 0.22,
-    ParamBrowLY: 0.5,
-    ParamBrowRY: 0.5,
-    ParamCheek: 0.4,
+    ParamEyeLOpen: 0.85,
+    ParamEyeROpen: 0.85,
+    ParamEyeLSmile: 0.95,
+    ParamEyeRSmile: 0.95,
+    ParamMouthOpenY: 0.2,
+    ParamMouthForm: 0.65,
+    ParamBrowLY: 0.45,
+    ParamBrowRY: 0.45,
+    ParamCheek: 0.55,
     ParamAngleZ: -3,
   },
   // 상황별 태그 매핑
@@ -53,30 +85,109 @@ const PARAMS_BY_TAG = {
   spaceout: { ParamAngleY: -8, ParamEyeLOpen: 0.42, ParamEyeROpen: 0.42, ParamMouthOpenY: 0.12, ParamMouthForm: 0 },
 };
 
-// (그룹, 인덱스) 후보 목록 - 앞에서부터 실제 존재하는 그룹을 사용
-const MOTION_PREFS = {
-  smile: [['TapBody', 0], ['Taphead', undefined], ['Tap', undefined]],
-  cheer: [['TapBody', 0], ['Taphead', 0], ['Tap', undefined]],
-  love: [['TapBody', 1], ['Taphead', undefined], ['Tap', 0]],
-  sad: [['TapBody', 2], ['Taphead', 1], ['Tap', 0]],
-  think: null,
-  wink: null,
-  neutral: null,
+// 모델별 감정/행동 모션. 없는 태그는 표정+파라미터로만 반응한다.
+// (은랑 TapBody=변신, 센코 Tap/Taphead=10~36초 노래·수면처럼 대화가 끝난 뒤에도 남는 모션은 자동 재생 금지)
+const MOTION_BY_MODEL = {
+  haru: {
+    smile: ['TapBody', 0], think: ['Idle', 0], cheer: ['TapBody', 0], sad: ['TapBody', 2],
+    wink: ['TapBody', 1], love: ['TapBody', 1], focus: ['Idle', 1], proud: ['TapBody', 3],
+    fighting: ['TapBody', 0], shy: ['TapBody', 1], panic: ['TapBody', 3], curious: ['TapBody', 0],
+    dozeoff: ['Idle', 1], relieved: ['Idle', 0], pout: ['TapBody', 2], whisper: ['Idle', 0],
+    sparkle: ['TapBody', 0], spaceout: ['Idle', 1], nod: ['TapBody', 0], shake: ['TapBody', 3],
+    wave: ['TapBody', 0], clap: ['TapBody', 3], dance: ['TapBody', 1], explain: ['Idle', 0],
+    surprise: ['TapBody', 0], joy: ['TapBody', 0], angry: ['TapBody', 2], sleepy: ['Idle', 1],
+    wakeup: ['Idle', 0], greet: ['TapBody', 0],
+  },
+  hiyori_pro: {
+    smile: ['Idle', 1], think: ['Idle', 0], cheer: ['FlickUp', 0], sad: ['FlickDown', 0],
+    wink: ['Idle', 1], love: ['Idle', 1], focus: ['Idle', 2], proud: ['FlickUp', 0],
+    fighting: ['FlickUp', 0], shy: ['Flick', 0], panic: ['Flick', 0], curious: ['Idle', 1],
+    dozeoff: ['Idle', 2], relieved: ['Idle', 1], pout: ['FlickDown', 0], whisper: ['Idle', 1],
+    sparkle: ['FlickUp', 0], spaceout: ['Idle', 2], nod: undefined, shake: undefined,
+    wave: ['FlickUp', 0], clap: ['Tap@Body', 0], dance: ['FlickUp', 0], explain: ['Idle', 0],
+    surprise: ['FlickUp', 0], joy: ['FlickUp', 0], angry: ['FlickDown', 0], sleepy: ['Idle', 2],
+    wakeup: ['Idle', 0], greet: ['FlickUp', 0],
+  },
+  miku: {
+    smile: ['Tap', 0], think: ['Idle', 0], cheer: ['Flick', 0], sad: ['Flick3', 0],
+    wink: ['Tap', 1], love: ['Tap', 1], focus: ['Idle', 0], proud: ['Flick', 1],
+    fighting: ['Flick', 0], shy: ['Tap', 2], panic: ['Flick', 2], curious: ['Tap', 0],
+    dozeoff: ['Idle', 0], relieved: ['Idle', 0], pout: ['Flick', 2], whisper: ['Tap', 2],
+    sparkle: ['Flick', 0], spaceout: ['Idle', 0], nod: ['Tap', 0], shake: ['Flick', 1],
+    wave: ['Flick', 0], clap: ['Tap', 1], dance: ['Tap', 2], explain: ['Idle', 0],
+    surprise: ['Flick', 0], joy: ['Flick', 0], angry: ['Flick', 2], sleepy: ['Idle', 0],
+    wakeup: ['Tap', 0], greet: ['Tap', 0],
+  },
+  // 세코/은랑은 보유 모션이 노래(16s)·변신(안경 토글)·수면 같은 특수 동작뿐이라,
+  // 의미가 맞는 경우에만 연결하고 나머지는 표정·파라미터 반응으로 남긴다.
+  senko: {
+    sleepy: ['Taphead', 1], dozeoff: ['Taphead', 1], spaceout: ['Taphead', 1],
+    dance: ['Tap', 0],
+  },
+  yinlang: {
+    sleepy: ['TapBody', 2], dozeoff: ['TapBody', 2],
+  },
+};
+
+// 모델별 건드리기(탭) 모션. 루프/상태가 남는 모션은 넣지 않는다.
+const TAP_MOTION_BY_MODEL = {
+  haru: [['TapBody', undefined]],
+  hiyori_pro: [['Tap', 0], ['Tap@Body', 0]],
+  miku: [['Tap', undefined], ['Flick', undefined]],
+  yinlang: [],
+  senko: [],
+};
+
+// 모델별 쓰다듬기(펫) 모션. 탭(공격/놀람) 반응과 철저히 분리된 부드럽고 다정한 모션.
+const PET_MOTION_BY_MODEL = {
+  haru: [['Idle', 0]],
+  hiyori_pro: [['Idle', 1]], // m02: 고개를 살포시 기울이며 다정하게 미소 짓는 모션
+  miku: [['Idle', 0]],
+  yinlang: [],
+  senko: [],
+};
+
+// 모델별 축하(더블클릭) 모션.
+const CELEBRATE_MOTION_BY_MODEL = {
+  haru: [['TapBody', 0]],
+  hiyori_pro: [['FlickUp', 0], ['Tap', 0]],
+  miku: [['Flick', 0], ['Tap', 0]],
+  yinlang: [],
+  senko: [],
+};
+
+// Cubism 3/4 표준 파라미터 ID ↔ Cubism 2 레거시 파라미터 ID 매핑 (Miku 등 대응)
+export const PARAM_LEGACY_MAP = {
+  ParamAngleX: 'PARAM_ANGLE_X',
+  ParamAngleY: 'PARAM_ANGLE_Y',
+  ParamAngleZ: 'PARAM_ANGLE_Z',
+  ParamEyeLOpen: 'PARAM_EYE_L_OPEN',
+  ParamEyeROpen: 'PARAM_EYE_R_OPEN',
+  ParamEyeLSmile: 'PARAM_EYE_L_SMILE',
+  ParamEyeRSmile: 'PARAM_EYE_R_SMILE',
+  ParamEyeBallX: 'PARAM_EYE_BALL_X',
+  ParamEyeBallY: 'PARAM_EYE_BALL_Y',
+  ParamBrowLY: 'PARAM_BROW_L_Y',
+  ParamBrowRY: 'PARAM_BROW_R_Y',
+  ParamBrowLX: 'PARAM_BROW_L_X',
+  ParamBrowRX: 'PARAM_BROW_R_X',
+  ParamBrowLAngle: 'PARAM_BROW_L_ANGLE',
+  ParamBrowRAngle: 'PARAM_BROW_R_ANGLE',
+  ParamBrowLForm: 'PARAM_BROW_L_FORM',
+  ParamBrowRForm: 'PARAM_BROW_R_FORM',
+  ParamMouthForm: 'PARAM_MOUTH_FORM',
+  ParamMouthOpenY: 'PARAM_MOUTH_OPEN_Y',
+  ParamCheek: 'PARAM_CHEEK',
+  ParamBodyAngleX: 'PARAM_BODY_ANGLE_X',
+  ParamBodyAngleY: 'PARAM_BODY_ANGLE_Y',
+  ParamBodyAngleZ: 'PARAM_BODY_ANGLE_Z',
+  ParamBreath: 'PARAM_BREATH',
 };
 
 export const EMOTION_TAGS = Object.keys(PARAMS_BY_TAG);
 
-function setParam(model, id, value) {
-  try {
-    model.internalModel.coreModel.setParameterValueById(id, value, 1);
-  } catch {
-    /* 파라미터가 없는 모델은 무시 */
-  }
-}
-
-export function setParams(model, paramMap) {
-  for (const [id, value] of Object.entries(paramMap)) setParam(model, id, value);
-}
+// 표정 정의는 없지만 상황 모션으로 응답하는 행동 태그 (서버 VALID_EMOTIONS와 동일하게 맞춰야 한다)
+export const ACTION_TAGS = ['nod', 'shake', 'wave', 'clap', 'dance', 'explain', 'surprise', 'joy', 'angry', 'sleepy', 'wakeup', 'greet'];
 
 function motionGroupCount(model, group) {
   try {
@@ -87,137 +198,167 @@ function motionGroupCount(model, group) {
   }
 }
 
-export function playMotion(model, tag) {
-  const prefs = MOTION_PREFS[tag];
-  if (!prefs) {
-    try { model.motion('Idle'); } catch { /* noop */ }
-    return;
-  }
-  for (const [group, idx] of prefs) {
-    const count = motionGroupCount(model, group);
-    if (count === 0) continue;
-    try {
-      const safeIdx = idx == null ? undefined : Math.min(idx, count - 1);
-      model.motion(group, safeIdx);
-      return;
-    } catch {
-      /* 다음 후보 시도 */
-    }
-  }
-  try { model.motion('Idle'); } catch { /* noop */ }
+function modelKey(modelId) {
+  const key = (modelId || '').toLowerCase();
+  if (MOTION_BY_MODEL[key]) return key;
+  if (key.includes('hiyori')) return 'hiyori_pro';
+  if (key.includes('miku')) return 'miku';
+  if (key.includes('yinlang') || key.includes('silverwolf')) return 'yinlang';
+  if (key.includes('senko')) return 'senko';
+  if (key.includes('haru')) return 'haru';
+  return null;
 }
 
-// 건드리기(놀리기) 반응용 그룹
-export function playTapMotion(model) {
-  for (const g of ['TapBody', 'Tap', 'Taphead']) {
-    if (motionGroupCount(model, g) > 0) {
-      try { model.motion(g); return; } catch { /* next */ }
-    }
+// 재생 요청. FORCE여도 SDK가 페이드 인/아웃으로 크로스페이드한다.
+function requestMotion(model, group, index) {
+  if (!model || !group) return false;
+  if (motionGroupCount(model, group) === 0) return false;
+  try {
+    const r = model.motion(group, index ?? undefined, 3);
+    if (r?.catch) r.catch(() => {});
+    return true;
+  } catch {
+    return false;
   }
 }
 
-export function applyEmotion(model, tag, modelId = null) {
-  const params = PARAMS_BY_TAG[tag] || PARAMS_BY_TAG.smile;
-  // 립싱크 파라미터 제외 악센트(각도/눈/눈썹) 적용
-  for (const [id, value] of Object.entries(params)) {
-    if (id === 'ParamMouthOpenY') continue;
-    setParam(model, id, value);
-  }
-  applyExpression(model, tag, modelId);
-  playMotion(model, tag);
-  return params;
+export function playMotion(model, tag, modelId = null) {
+  const key = modelKey(modelId);
+  const pick = key && MOTION_BY_MODEL[key]?.[tag];
+  if (!pick) return false;
+  return requestMotion(model, pick[0], pick[1]);
 }
 
-// 모션 없이 파라미터+표정만 적용 (쓰다듬기 연타 등 반복 호출용)
+// 진행 중인 모션을 세운다. 새 반응 시작 시 호출해 이전 모션이 남는 것을 막는다.
+export function cancelMotions(model) {
+  try { model?.internalModel?.motionManager?.stopAllMotions(); } catch { /* noop */ }
+}
+
+// 모델별 모션/표정 동작 옵션. 로드 직후 1회 적용한다.
+export function configureMotionModel(model, modelId) {
+  if (!model) return;
+  // 모션 시작 시 표정이 초기화되는 것을 막아 감정 표현이 유지되게 한다.
+  const cfg = window.PIXI?.live2d?.config;
+  if (cfg) {
+    cfg.preserveExpressionOnMotion = true;
+    cfg.motionFadingDuration = 600;     // 기본 모션 페이드 시간 600ms
+    cfg.idleMotionFadingDuration = 800; // 유휴 모션 페이드 시간 800ms (기본 2초의 늘어짐 해소)
+    if (cfg.cubism4) cfg.cubism4.setOpacityFromMotion = true;
+  }
+
+  // Cubism 4 모션 매니저 크로스페이드 패치:
+  // 기본 Cubism4MotionManager._startMotion은 queueManager.stopAllMotions()를 호출하여 이전 모션을 즉시 삭제함.
+  // 이로 인해 동작 전환 시 뚝 끊기는 현상이 발생하므로, stopAllMotions() 없이 startMotion의 setFadeOut으로 부드럽게 크로스페이드하도록 변경.
+  const mm = model.internalModel?.motionManager;
+  if (mm && typeof mm._startMotion === 'function') {
+    mm._startMotion = function(motion, onFinish) {
+      motion.setFinishedMotionHandler(onFinish);
+      return this.queueManager.startMotion(motion, false, performance.now());
+    };
+  }
+
+  // 자동 Idle이 수면/특수 모션을 골라 반복하는 것을 막는다.
+  const defs = model.internalModel?.motionManager?.definitions;
+  if (defs?.Idle && modelKey(modelId) === 'yinlang') {
+    const safe = defs.Idle.filter((d) => !/sleep/i.test(d?.File || ''));
+    if (safe.length) defs.Idle = safe;
+  }
+}
+
+// 건드리기(놀리기) 반응용 모션
+export function playTapMotion(model, modelId = null) {
+  if (!model) return false;
+  const key = modelKey(modelId);
+  const candidates = (key && TAP_MOTION_BY_MODEL[key]) || [['TapBody', undefined], ['Tap', undefined], ['Flick', undefined]];
+  for (const [group, index] of candidates) {
+    if (requestMotion(model, group, index)) return true;
+  }
+  return false;
+}
+
+// 표정+파라미터만 적용한다. 모션은 반응(레이어) 시작 후에 스테이지가 별도로 요청한다.
 export function softEmotion(model, tag, modelId = null) {
   const params = PARAMS_BY_TAG[tag] || PARAMS_BY_TAG.smile;
-  for (const [id, value] of Object.entries(params)) {
-    if (id === 'ParamMouthOpenY') continue;
-    setParam(model, id, value);
-  }
   applyExpression(model, tag, modelId);
   return params;
 }
 
-// 모델별 표정(expression) 매핑. 표정 파일 의미를 아는 모델만 등록.
-// (모르는 모델에 잘못된 표정을 씌우지 않도록 미등록 모델은 파라미터 방식만 사용)
+// 모델별 표정(expression) 매핑. 표정 파일 의미를 아는 것만 등록.
+// 미등록 태그는 기본 표정으로 되돌려 이전 감정이 남지 않게 한다.
 const EXPRESSION_BY_MODEL = {
   yinlang: {
     smile: ['e05'],
     love: ['e02'],
     cheer: ['e07'],
     sad: ['e08'],
-    think: ['e06'],
-    wink: ['e05'],
-    neutral: ['e06'],
-    focus: ['e06'],
-    proud: ['e05', 'e07'],
     fighting: ['e07'],
+    proud: ['e07'],
     shy: ['e02'],
-    panic: ['e08', 'e04'],
-    curious: ['e06'],
-    dozeoff: ['e06'],
+    panic: ['e08'],
     relieved: ['e05'],
-    pout: ['e04', 'e08'],
     whisper: ['e05'],
-    sparkle: ['e07', 'e02'],
-    spaceout: ['e06'],
+    sparkle: ['e07'],
+  },
+  haru: {
+    smile: ['f00', 'f04'],
+    love: ['f06'],
+    cheer: ['f04'],
+    sad: ['f03'],
+    think: ['f07'],
+    wink: ['f00'],
+    neutral: ['f00'],
+    focus: ['f07'],
+    proud: ['f01'],
+    fighting: ['f04', 'f01'],
+    shy: ['f06'],
+    panic: ['f05'],
+    curious: ['f00'],
+    dozeoff: ['f00'],
+    relieved: ['f04'],
+    pout: ['f02', 'f03'],
+    whisper: ['f00'],
+    sparkle: ['f05'],
+    spaceout: ['f00'],
   },
 };
 
 function applyExpression(model, tag, modelId) {
-  const names = modelId && EXPRESSION_BY_MODEL[modelId]?.[tag];
-  if (!names || !model || typeof model.expression !== 'function') return;
-  for (const name of names) {
-    try {
-      const r = model.expression(name);
-      if (r?.catch) r.catch(() => {});
-      break;
-    } catch {
-      /* 다음 후보 시도 */
-    }
+  if (!model || typeof model.expression !== 'function') return;
+  const key = modelKey(modelId);
+  const names = key && EXPRESSION_BY_MODEL[key]?.[tag];
+  const wanted = names?.[0] ?? null;
+  if (wanted && model._appliedExpression === wanted) return;
+  model._appliedExpression = wanted;
+  if (!wanted) {
+    try { model.internalModel?.motionManager?.expressionManager?.resetExpression(); } catch { /* noop */ }
+    return;
   }
-}
-
-// 모션 1회 재생. 루프형 모션(VTuber용 idle 계열)이 끝나지 않고
-// 계속 도는 모델을 위해 autoStopMs 지정 시 강제 종료 후 Idle 복귀.
-export function playOneShot(model, group, index, autoStopMs = 0) {
-  if (!model) return;
   try {
-    const r = model.motion(group, index);
-    if (r?.catch) r.catch(() => {});
+    const r = model.expression(wanted);
+    if (r?.then) r.then((ok) => { if (!ok) model._appliedExpression = null; }).catch(() => { model._appliedExpression = null; });
   } catch {
-    return;
-  }
-  if (autoStopMs > 0) {
-    const target = model;
-    setTimeout(() => {
-      try { target.internalModel?.motionManager?.stopAllMotions(); } catch {}
-    }, autoStopMs);
+    model._appliedExpression = null;
   }
 }
 
-// 쓰다듬기 반응용 모션: 루프형 모션 모델은 자동 정지付き
+// 쓰다듬기 반응용 모션 (다정한 유휴 모션 활용)
 export function playPetMotion(model, modelId = null) {
-  if (!model) return;
-  if (modelId === 'yinlang') {
-    const idx = Math.floor(Math.random() * 2); // transform1/2
-    playOneShot(model, 'TapBody', idx, 2600);
-    return;
+  if (!model) return false;
+  const key = modelKey(modelId);
+  const candidates = (key && PET_MOTION_BY_MODEL[key]) || [];
+  for (const [group, index] of candidates) {
+    if (requestMotion(model, group, index)) return true;
   }
-  playTapMotion(model);
+  return false;
 }
 
-// 축하(더블클릭) 반응용 모션
+// 축하(더블클릭) 반응용 모션: 우선순위 3(FORCE) 적용
 export function playCelebrateMotion(model, modelId = null) {
-  if (!model) return;
-  if (modelId === 'yinlang') {
-    playOneShot(model, 'TapBody', Math.floor(Math.random() * 3), 2600);
-    return;
+  if (!model) return false;
+  const key = modelKey(modelId);
+  const candidates = (key && CELEBRATE_MOTION_BY_MODEL[key]) || [['TapBody', 0], ['Tap', 0], ['Flick', 0]];
+  for (const [group, index] of candidates) {
+    if (requestMotion(model, group, index)) return true;
   }
-  for (const g of ['TapBody', 'Taphead', 'Tap']) {
-    if (motionGroupCount(model, g) > 0) {
-      try { model.motion(g, 0); return; } catch { /* next */ }
-    }
-  }
+  return false;
 }

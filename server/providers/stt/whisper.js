@@ -18,12 +18,8 @@ export class Provider extends STTProvider {
   async transcribe(audioBuffer, { sampleRate = 16000, language = 'korean' } = {}) {
     if (!this.pipe) throw new Error('STT 파이프라인이 초기화되지 않았습니다.');
 
-    const input = {
-      audio: audioBuffer,
+    const result = await this.pipe(audioBuffer, {
       sampling_rate: sampleRate,
-    };
-
-    const result = await this.pipe(input, {
       language,
       task: 'transcribe',
     });

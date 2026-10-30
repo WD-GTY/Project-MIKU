@@ -1,6 +1,5 @@
 @echo off
 setlocal EnableExtensions
-chcp 65001 >nul
 cd /d "%~dp0"
 title Project MIKU Server
 
@@ -13,7 +12,7 @@ echo.
 where npm >nul 2>&1
 if %errorlevel% neq 0 (
   echo [ERROR] npm not found. Install Node.js first.
-  timeout /t 5 >nul
+  pause
   exit /b 1
 )
 
@@ -35,36 +34,19 @@ if %errorlevel%==0 (
   )
 )
 
-netstat -ano | findstr :25565 >nul 2>&1
+netstat -ano | findstr ":25565 " | findstr "LISTENING" >nul 2>&1
 if %errorlevel%==0 (
-  echo [App] Port 25565 already in use. Opening app...
+  echo [App] Port 25565 is already in use. Opening browser...
   start "" http://localhost:25565
-  timeout /t 3 >nul
+  echo.
+  echo Server is already running. Close existing server window to restart.
+  echo [Tip] If no window is open, run: taskkill /F /IM node.exe
+  pause
   exit /b 0
 )
 
-netstat -ano | findstr :11434 >nul 2>&1
-if %errorlevel%==0 (
-  echo [Ollama] Already running on :11434 - reusing.
-) else (
-  where ollama >nul 2>&1
-  if %errorlevel%==0 (
-    echo [Ollama] Starting ollama serve...
-    start "Ollama Server" /min ollama serve
-    ping -n 4 127.0.0.1 >nul
-  ) else (
-    if exist "%LOCALAPPDATA%\Programs\Ollama\ollama.exe" (
-      echo [Ollama] Starting ollama serve...
-      start "Ollama Server" /min "%LOCALAPPDATA%\Programs\Ollama\ollama.exe" serve
-      ping -n 4 127.0.0.1 >nul
-    ) else (
-      echo [Ollama] ollama not found - skipping.
-    )
-  )
-)
-
 set "CHROMA_MINE="
-netstat -ano | findstr :8000 >nul 2>&1
+netstat -ano | findstr ":8000 " | findstr "LISTENING" >nul 2>&1
 if %errorlevel%==0 (
   echo [Chroma] Already running on :8000 - reusing.
 ) else (
@@ -85,6 +67,9 @@ if %errorlevel%==0 (
   )
 )
 
+echo.
+echo [App] Opening browser and starting server...
+start "" http://localhost:25565
 call npm start
 echo.
 echo [App] Server stopped.
@@ -94,5 +79,5 @@ if defined CHROMA_MINE (
   taskkill /f /im chroma.exe >nul 2>&1
 )
 
-echo [Done] All stopped.
-timeout /t 3 >nul
+echo [Done] Server stopped.
+pause

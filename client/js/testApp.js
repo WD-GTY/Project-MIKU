@@ -1,6 +1,7 @@
 // 기능별 독립 테스트 페이지 로직.
 // LLM/STT/TTS API 키가 없어도 각 기능을 따로 검증할 수 있게 합니다.
 import { Live2DStage } from './avatar/live2dStage.js';
+import { EMOTION_TAGS, ACTION_TAGS } from './avatar/emotions.js';
 import { WSClient } from './agent/wsClient.js';
 import { TTSAudioPlayer } from './audio/playback.js';
 import { MicManager } from './audio/micManager.js';
@@ -172,6 +173,7 @@ async function loadAvatar() {
     onLipVolume((vol) => state.stage.setLipVolume(vol));
     state.stage.onZoomChange = () => refreshTestZoom();
     await state.stage.init({ availableModels: state.avatarModels });
+    window._stage = state.stage; // 콘솔에서 직접 상태를 들여다보기 위한 노출
     state.modelName = state.stage.modelId
       ? `${state.stage.modelId}${state.stage.modelId === 'haru' ? ' (기본)' : ''}`
       : (state.stage.modelUrl.includes('haru') ? 'Haru (기본)' : 'Senko (대체)');
@@ -313,25 +315,20 @@ function bindAvatarTests() {
     if (!needStage()) return;
     const p = center();
     const n = state.stage.petAt(p.x, p.y, 3);
-    setText('#interact-info', `쓰다듬기 ✅ 누적 ${n} 스트로크 (표정+하트, 3회마다 모션)`);
+    const i = state.stage.getActionInfo();
+    setText('#interact-info', `쓰다듬기 ✅ 누적 ${n} 스트로크 (강도 ${i.petIntensity}, 3회마다 모션)`);
   });
   $('#btn-hold') && ($('#btn-hold').onclick = () => {
     if (!needStage()) return;
     const p = center();
     state.stage.holdAt(p.x, p.y);
-    setText('#interact-info', '홀딩 ✅ love 표정 + 하트 3개');
+    reportAction('#interact-info', '홀딩 ✅');
   });
   $('#btn-celebrate') && ($('#btn-celebrate').onclick = () => {
     if (!needStage()) return;
     const p = center();
     state.stage.celebrateAt(p.x, p.y);
-    setText('#interact-info', '축하 ✅ cheer 표정 + 모션 + 하트 5개');
-  });
-  $('#btn-hearts') && ($('#btn-hearts').onclick = () => {
-    if (!needStage()) return;
-    const p = center();
-    state.stage.heartAt(p.x, p.y, 5);
-    setText('#interact-info', '하트 ✅ 5개 표시');
+    reportAction('#interact-info', '축하 ✅');
   });
 
   // 아바타 API
@@ -351,27 +348,34 @@ function bindAvatarTests() {
   });
   $('#btn-api-set-yinlang') && ($('#btn-api-set-yinlang').onclick = async () => {
     try {
+      const before = await getAvatarModel(TEST_SESSION);
       const saved = await postAvatarModel(TEST_SESSION, 'yinlang');
       const got = await getAvatarModel(TEST_SESSION);
+      await postAvatarModel(TEST_SESSION, before); // 사용자 모델을 건드리지 않고 되돌린다
       const ok = saved.modelId === 'yinlang' && got === 'yinlang';
-      setText('#api-info', `${ok ? 'PASS' : 'FAIL'} ③ 저장=${saved.modelId} / 재조회=${got}`);
+      setText('#api-info', `${ok ? 'PASS' : 'FAIL'} ③ 저장=${saved.modelId} / 재조회=${got} / 원복=${before}`);
     } catch (err) { setText('#api-info', `FAIL ③ ${err.message}`); }
   });
   $('#btn-api-set-bad') && ($('#btn-api-set-bad').onclick = async () => {
     try {
+      const before = await getAvatarModel(TEST_SESSION);
       const saved = await postAvatarModel(TEST_SESSION, 'no-such-model');
       const ok = saved.modelId === state.defaultModelId;
-      setText('#api-info', `${ok ? 'PASS' : 'FAIL'} ④ 무효ID → ${saved.modelId} (기본값 ${state.defaultModelId} 기대)`);
+      await postAvatarModel(TEST_SESSION, before);
+      setText('#api-info', `${ok ? 'PASS' : 'FAIL'} ④ 무효ID → ${saved.modelId} (기본값 ${state.defaultModelId} 기대) / 원복=${before}`);
     } catch (err) { setText('#api-info', `FAIL ④ ${err.message}`); }
   });
   $('#btn-api-isolation') && ($('#btn-api-isolation').onclick = async () => {
     try {
+      // 서버는 세션과 무관하게 전역 하나의 모델을 쓴다 → 다른 세션에서도 같은 값이 보여야 한다.
+      const before = await getAvatarModel(TEST_SESSION);
       await postAvatarModel(`${TEST_SESSION}-A`, 'yinlang');
-      await postAvatarModel(`${TEST_SESSION}-B`, 'senko');
-      const a = await getAvatarModel(`${TEST_SESSION}-A`);
-      const b = await getAvatarModel(`${TEST_SESSION}-B`);
-      const ok = a === 'yinlang' && b === 'senko';
-      setText('#api-info', `${ok ? 'PASS' : 'FAIL'} ⑤ A=${a} / B=${b} (세션 분리)`);
+      const viaB = await getAvatarModel(`${TEST_SESSION}-B`);
+      const merged = viaB === 'yinlang';
+      await postAvatarModel(TEST_SESSION, before); // 테스트가 고른 모델을 되돌린다
+      const restored = await getAvatarModel(TEST_SESSION);
+      const ok = merged && restored === before;
+      setText('#api-info', `${ok ? 'PASS' : 'FAIL'} ⑤ 전역 통합: A 저장→B 조회=${viaB} (기대 yinlang) / 원복=${restored} (기대 ${before})`);
     } catch (err) { setText('#api-info', `FAIL ⑤ ${err.message}`); }
   });
 
@@ -405,43 +409,97 @@ function bindAvatarTests() {
     btn.onclick = () => applyExpr(btn.dataset.expr);
   });
 
-  // 상황별 모션
-  const bindSit = (sel, fn, label) => {
-    const el = $(sel);
-    if (!el) return;
+  // 상황별 모션: 버튼 id 접미사가 그대로 상황 태그 이름이다.
+  // 모션 파일은 비동기로 로드되므로 직후 조회에서는 잡히지 않는다 → 잠시 뒤 다시 쓴다.
+  const reportAction = (sel, prefix) => {
+    if (!state.stage) { setText(sel, '아바타를 먼저 로드하세요 (②).'); return; }
+    const write = () => {
+      const i = state.stage.getActionInfo();
+      setText(sel, `${prefix}  감정=${i.emotion}  반응=${i.reaction?.name ?? '없음'}  모션=${i.motion ? `${i.motion.group}[${i.motion.index}]` : '없음(파라미터 반응)'}`);
+    };
+    write();
+    setTimeout(write, 400);
+  };
+
+  document.querySelectorAll('[id^="btn-s-"]').forEach((el) => {
+    const name = el.id.replace('btn-s-', '');
     el.onclick = () => {
       if (!state.stage) { setText('#situation-info', '아바타를 먼저 로드하세요 (②).'); return; }
-      fn();
-      setText('#situation-info', `${label} ▶ 재생 중...`);
+      const ok = state.stage.playSituation(name);
+      if (!ok) { setText('#situation-info', `${name} ❌ 등록된 상황 모션이 없습니다.`); return; }
+      reportAction('#situation-info', `${name} ▶ 재생 중…`);
     };
+  });
+
+  // 감정 / 행동 태그 (전체 태그를 코드 목록에서 만들어 서버 허용치와 어긋나지 않게 한다)
+  const renderTagButtons = () => {
+    const fill = (sel, tags) => {
+      const box = $(sel);
+      if (!box) return;
+      box.innerHTML = '';
+      for (const tag of tags) {
+        const b = document.createElement('button');
+        b.textContent = `[${tag}]`;
+        b.dataset.tag = tag;
+        b.onclick = () => sendTag(tag, false);
+        box.appendChild(b);
+      }
+    };
+    fill('#emotion-btns', EMOTION_TAGS);
+    fill('#action-btns', ACTION_TAGS);
   };
-  bindSit('#btn-s-nod', () => state.stage.playNod(), '끄덕끄덕 ✅');
-  bindSit('#btn-s-think', () => state.stage.playThink(), '생각 ✅');
-  bindSit('#btn-s-surprise', () => state.stage.playSurprise(), '놀람 ✅');
-  bindSit('#btn-s-joy', () => state.stage.playJoy(), '기쁨 ✅');
-  bindSit('#btn-s-sad', () => state.stage.playSad(), '슬픔 ✅');
-  bindSit('#btn-s-angry', () => state.stage.playAngry(), '화남 ✅');
-  bindSit('#btn-s-sleepy', () => state.stage.playSleepy(), '졸음 ✅');
-  bindSit('#btn-s-wakeup', () => state.stage.playWakeUp(), '깨어남 ✅');
-  bindSit('#btn-s-greet', () => state.stage.playGreet(), '인사 ✅');
-  bindSit('#btn-s-shake', () => state.stage.playShake(), '흔들기 ✅');
-  bindSit('#btn-s-wave', () => state.stage.playWave(), '손 흔들기 ✅');
-  bindSit('#btn-s-clap', () => state.stage.playClap(), '박수 ✅');
-  bindSit('#btn-s-dance', () => state.stage.playDance(), '춤 💃 ✅');
-  bindSit('#btn-s-explain', () => state.stage.playExplain(), '설명 포즈 ✅');
-  // 신규 12종 상황별 모션
-  bindSit('#btn-s-focus', () => state.stage.playFocus(), '열공/집중 🎯 ✅');
-  bindSit('#btn-s-proud', () => state.stage.playProud(), '뿌듯/자신감 😤 ✅');
-  bindSit('#btn-s-fighting', () => state.stage.playFighting(), '응원/파이팅 🔥 ✅');
-  bindSit('#btn-s-shy', () => state.stage.playShy(), '부끄/수줍 😳 ✅');
-  bindSit('#btn-s-panic', () => state.stage.playPanic(), '당황/멘붕 😱 ✅');
-  bindSit('#btn-s-curious', () => state.stage.playCurious(), '갸우뚱/호기심 ❓ ✅');
-  bindSit('#btn-s-dozeoff', () => state.stage.playDozeOff(), '꾸벅꾸벅 😴 ✅');
-  bindSit('#btn-s-relieved', () => state.stage.playRelieved(), '안도/다행 😮‍💨 ✅');
-  bindSit('#btn-s-pout', () => state.stage.playPout(), '삐짐/뾰로통 😤 ✅');
-  bindSit('#btn-s-whisper', () => state.stage.playWhisper(), '속닥속닥/비밀 🤫 ✅');
-  bindSit('#btn-s-sparkle', () => state.stage.playSparkle(), '초롱초롱/기대 ✨ ✅');
-  bindSit('#btn-s-spaceout', () => state.stage.playSpaceOut(), '멍때리기/뇌정지 🫠 ✅');
+  renderTagButtons();
+
+  const sendTag = (raw, localOnly) => {
+    const tag = String(raw || '').trim().toLowerCase();
+    if (!tag) return;
+    const wsOpen = state.ws?.ws?.readyState === 1;
+    if (!localOnly && wsOpen) {
+      state.ws.send({ type: 'test_emotion', tag });
+      setText('#emotion-info', `서버 경유 전송 → [${tag}] (응답이 돌아오면 아바타에 반영됩니다)`);
+      return;
+    }
+    if (!state.stage) {
+      setText('#emotion-info', `[${tag}] 적용 실패 — WS 미연결이고 아바타도 없습니다. ① WS 연결 또는 ② 아바타 로드 후 다시 시도하세요.`);
+      return;
+    }
+    state.stage.setEmotion(tag);
+    reportAction('#emotion-info', `로컬 직접 적용 → [${tag}]`);
+  };
+
+  $('#btn-tag-send') && ($('#btn-tag-send').onclick = () => sendTag($('#tag-input').value, false));
+  $('#btn-tag-local') && ($('#btn-tag-local').onclick = () => sendTag($('#tag-input').value, true));
+  $('#tag-input') && ($('#tag-input').onkeydown = (e) => { if (e.key === 'Enter') sendTag(e.target.value, false); });
+
+  // 현재 동작 상태 패널
+  let stateTimer = null;
+  const renderActionState = () => {
+    const el = $('#action-state');
+    if (!el) return;
+    if (!state.stage) { el.textContent = '아바타 미로드 (②에서 로드하세요)'; return; }
+    const i = state.stage.getActionInfo();
+    const layers = Object.entries(i.layers)
+      .map(([k, ids]) => `  ${k.padEnd(8)} ${ids.join(', ')}`).join('\n') || '  (없음)';
+    el.textContent = [
+      `모델 ${i.model} · 감정 ${i.emotion} · 반응 ${i.reaction ? `${i.reaction.name} (남은 ${i.reaction.msLeft}ms)` : '없음'}`,
+      `모션 ${i.motion ? `${i.motion.group}[${i.motion.index}] prio${i.motion.priority}` : '없음'} · 발화 ${i.speaking ? 'O' : 'X'} · 음량 ${i.lipVolume} · 입 ${i.mouth}`,
+      `쓰다듬기 ${i.petIntensity} · 시선추적 ${i.trackIntensity} · 복귀 중 ${i.fading.length ? i.fading.join(', ') : '없음'}`,
+      '레이어 (action > blink > pet > emotion > idle 순으로 우선):',
+      layers,
+    ].join('\n');
+  };
+  $('#btn-state-refresh') && ($('#btn-state-refresh').onclick = renderActionState);
+  $('#btn-state-toggle') && ($('#btn-state-toggle').onclick = () => {
+    if (stateTimer) {
+      clearInterval(stateTimer);
+      stateTimer = null;
+      setText('#btn-state-toggle', '🔍 동작 상태 자동 갱신');
+      return;
+    }
+    stateTimer = setInterval(renderActionState, 250);
+    setText('#btn-state-toggle', '⏸ 자동 갱신 중지');
+    renderActionState();
+  });
 }
 
 // ---------- 버튼 바인딩 ----------
@@ -451,10 +509,6 @@ function bind() {
   $('#btn-ws-close').onclick = () => state.ws?.close();
 
   $('#btn-avatar-load').onclick = loadAvatar;
-
-  document.querySelectorAll('#emotion-btns button').forEach((btn) => {
-    btn.onclick = () => state.ws?.send({ type: 'test_emotion', tag: btn.dataset.tag });
-  });
 
   $('#btn-tap').onclick = () => state.stage?.tap();
 

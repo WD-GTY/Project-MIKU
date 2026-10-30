@@ -13,18 +13,22 @@ const VENDOR = path.join(ROOT, 'client', 'vendor');
 fs.mkdirSync(VENDOR, { recursive: true });
 
 function copy(name, relPath) {
+  const target = path.join(VENDOR, name);
+  if (fs.existsSync(target) && fs.statSync(target).size > 0) return;
   const src = path.join(ROOT, 'node_modules', relPath);
   if (!fs.existsSync(src)) throw new Error(`파일 없음: ${src}`);
   const buf = fs.readFileSync(src);
-  fs.writeFileSync(path.join(VENDOR, name), buf);
+  fs.writeFileSync(target, buf);
   console.log(`  ok  ${name} (${(buf.length / 1024).toFixed(1)} KB)`);
 }
 
 async function download(name, url) {
+  const target = path.join(VENDOR, name);
+  if (fs.existsSync(target) && fs.statSync(target).size > 0) return;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`다운로드 실패 (${res.status}): ${url}`);
   const buf = Buffer.from(await res.arrayBuffer());
-  fs.writeFileSync(path.join(VENDOR, name), buf);
+  fs.writeFileSync(target, buf);
   console.log(`  ok  ${name} (${(buf.length / 1024).toFixed(1)} KB)`);
 }
 

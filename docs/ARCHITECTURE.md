@@ -1,8 +1,8 @@
 # AI 컴페니언 아키텍처
 
 학습용 친근한 어시스턴트 + 커스텀 Live2D 아바타.
-LLM/STT/TTS는 **Provider 인터페이스**로 분리되어 있으며, 기본값으로 Ollama(LLM) · Edge TTS · Whisper(STT)가 활성화되어 있습니다.
-프로바이더 로드/연결 실패 시 자동으로 mock으로 폴백하므로 서버는 항상 기동됩니다.
+LLM/STT/TTS는 **Provider 인터페이스**로 분리되어 있으며, 기본값으로 Ollama(LLM) · Gemini 3.8 Flash TTS · Whisper(STT)가 활성화되어 있습니다.
+프로바이더 로드/연결 실패 시 자동으로 mock으로 폴백하므로 서버는 항상 기동됩니다. Gemini TTS는 `GEMINI_API_KEY`가 필요하며, 키가 없으면 Edge TTS로 폴백합니다.
 
 ## 구조
 
@@ -69,10 +69,16 @@ client/                        # 순수 HTML/JS (빌드 도구 불필요)
 
 ```
 server/providers/llm/openai.js     →  export class ... extends LLMProvider { async *streamChat() }
-server/providers/tts/elevenlabs.js →  export default class ... extends TTSProvider { async *speak() }
+server/providers/tts/gemini.js     →  Interactions API 호출 → WAV(24kHz mono 16-bit) 반환
 server/providers/stt/whisper.js    →  extends STTProvider (실시간 스트리밍)
-.env: LLM_PROVIDER=openai / TTS_PROVIDER=elevenlabs / STT_PROVIDER=whisper
+.env: LLM_PROVIDER=openai / TTS_PROVIDER=gemini / STT_PROVIDER=whisper
 ```
+
+Gemini TTS 튜닝:
+- `GEMINI_TTS_VOICE` — 프리빌트 30종(Leda, Aoede, Kore, Sulafat 등), 확장 보이스 라이브러리, 커스텀 보이스 ID
+- `GEMINI_TTS_STYLE` — 문장 단위 `speech_metadata.style` 자연어 지시(감정·속도·볼륨). 예: `warm and enthusiastic`
+- `GEMINI_TTS_MODEL` — `gemini-3.8-flash-tts`(표현력) / `gemini-3.8-flash-lite-tts`(경량)
+- 피치/속도 수치 파라미터는 없습니다. 스타일 지시 또는 후처리로 제어합니다.
 STT는 웹소켓 바이너리(마이크 PCM 16kHz Int16) → 서버 Whisper 인식 → `user_text` 구조로 구현되어 있습니다(`hub.js` 의 isBinary 분기).
 서버는 에너지 기반 VAD로 침묵 800ms 를 감지해 발화를 절단하며, TTS 재생 시작 시 클라이언트가 `stt_reset` 을 보내 버퍼를 비웁니다.
 클라이언트는 `GET /api/config` 로 서버 STT 사용 여부를 판단합니다.

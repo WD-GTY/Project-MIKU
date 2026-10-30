@@ -164,8 +164,8 @@ MsEdgeTTS.getSynthUrl = async function getSynthUrlV2() {
 export class Provider extends TTSProvider {
   constructor({
     voice = process.env.TTS_VOICE || DEFAULT_VOICE,
-    pitch = process.env.TTS_PITCH || '+15Hz',
-    rate = process.env.TTS_RATE || '+5%',
+    pitch = process.env.TTS_PITCH || '+0Hz',
+    rate = process.env.TTS_RATE || '+0%',
     volume = process.env.TTS_VOLUME || '+0%',
   } = {}) {
     super();
@@ -181,13 +181,13 @@ export class Provider extends TTSProvider {
     console.log(`[tts] msedge 연결 성공 – 음성: ${this.voice} | pitch: ${this.pitch} | rate: ${this.rate} | volume: ${this.volume}`);
   }
 
-  async *speak(text) {
+  async *speak(text, { pitch, rate, volume } = {}) {
     if (!text?.trim()) return;
 
     const { audioStream } = this.tts.toStream(text, {
-      pitch: this.pitch,
-      rate: this.rate,
-      volume: this.volume,
+      pitch: pitch ?? this.pitch,
+      rate: rate ?? this.rate,
+      volume: volume ?? this.volume,
     });
     const chunks = [];
 

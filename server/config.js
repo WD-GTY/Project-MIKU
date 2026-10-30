@@ -11,6 +11,7 @@ export const CLIENT_DIR = path.join(ROOT, 'client');
 export const STORE_DIR = path.join(ROOT, 'server', 'store');
 export const MATERIALS_DIR = path.join(STORE_DIR, 'materials');
 export const MODEL_DIR = path.join(CLIENT_DIR, 'assets', 'models', 'live2d');
+export const LOGS_DIR = path.join(STORE_DIR, 'logs');
 
 export const config = {
   port: Number(process.env.PORT) || 25565,
@@ -20,11 +21,12 @@ export const config = {
   },
   memory: {
     dbPath: process.env.MEMORY_DB || path.join(STORE_DIR, 'memory.db'),
-    shortTermTurns: 12,
+    shortTermTurns: Number(process.env.SHORT_TERM_TURNS) || 500,
+    maxContextTokens: Number(process.env.MAX_CONTEXT_TOKENS) || 262144, // 256K 토큰 윈도우
     forgetHalfLifeDays: 7,
   },
   chunker: {
-    flushTimeoutMs: 1200,
+    flushTimeoutMs: 2200,
     maxChunkChars: 160,
   },
   providers: {
@@ -33,4 +35,10 @@ export const config = {
     tts: process.env.TTS_PROVIDER || 'mock',
     embedding: process.env.EMBEDDING_PROVIDER || 'transformers',
   },
+  logging: {
+    dir: process.env.LOG_DIR || LOGS_DIR,
+    level: process.env.LOG_LEVEL || 'info',
+    logStatic: process.env.LOG_STATIC === 'true',
+  },
+  tavilyApiKey: process.env.TAVILY_API_KEY || '',
 };

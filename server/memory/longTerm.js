@@ -25,6 +25,12 @@ export class LongTermMemory {
     this.dbPath = dbPath;
     this.halfLifeDays = forgetHalfLifeDays;
     this.items = [];
+    this.disposed = false;
+  }
+
+  dispose() {
+    this.disposed = true;
+    this.items = [];
   }
 
   async init() {

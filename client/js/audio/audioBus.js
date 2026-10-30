@@ -87,3 +87,15 @@ export function setMicBlocked(blocked) {
 export function getMicBlocked() {
   return micGain ? micGain.gain.value < 0.5 : false;
 }
+
+// --- 마스터 음량(TTS) 조절 (0.0 ~ 1.0) ---
+export function setMasterVolume(val) {
+  initRouting();
+  const clamped = Math.max(0, Math.min(1, Number(val)));
+  voiceBus.gain.setTargetAtTime(clamped, getContext().currentTime, 0.02);
+}
+
+export function getMasterVolume() {
+  initRouting();
+  return voiceBus.gain.value;
+}

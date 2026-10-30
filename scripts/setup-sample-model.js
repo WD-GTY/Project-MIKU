@@ -51,6 +51,9 @@ const SENKO_FILES = [
 
 async function download(base, relPath, destDir) {
   const outPath = path.join(destDir, relPath.split('/').slice(2).join('/'));
+  if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) {
+    return; // 이미 존재하는 경우 다운로드 생략
+  }
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   const url = `${base}/${relPath}`;
   const res = await fetch(url);

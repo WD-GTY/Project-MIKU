@@ -87,7 +87,6 @@
         </div>
         <div class="row">
           <button id="btn-celebrate">축하</button>
-          <button id="btn-hearts">하트 ×5</button>
         </div>
         <div class="res" id="interact-info">중앙점 기준으로 반응 테스트. 캔버스 직접 조작도 가능.</div>
       </section>
@@ -104,7 +103,7 @@
           <button id="btn-api-set-bad">④ 무효ID → 기본값 확인</button>
         </div>
         <div class="row">
-          <button id="btn-api-isolation">⑤ 세션 분리 확인 (A=yinlang / B=haru)</button>
+          <button id="btn-api-isolation">⑤ 전역 모델 통합 확인 + 원복</button>
         </div>
         <div class="res" id="api-info">각 단계별 PASS/FAIL 표시</div>
       </section>
@@ -178,32 +177,28 @@
       <!-- 감정 -->
       <section class="card wide">
         <h2>③ 감정 / 상황 태그 (아바타 표정/모션 연동)</h2>
-        <div class="row" id="emotion-btns">
-          <button data-tag="smile">[smile]</button>
-          <button data-tag="think">[think]</button>
-          <button data-tag="cheer">[cheer]</button>
-          <button data-tag="sad">[sad]</button>
-          <button data-tag="wink">[wink]</button>
-          <button data-tag="love">[love]</button>
-          <button data-tag="neutral">[neutral]</button>
-          <button data-tag="focus">[focus]</button>
-          <button data-tag="proud">[proud]</button>
-          <button data-tag="fighting">[fighting]</button>
-          <button data-tag="shy">[shy]</button>
-          <button data-tag="panic">[panic]</button>
-          <button data-tag="curious">[curious]</button>
-          <button data-tag="relieved">[relieved]</button>
-          <button data-tag="pout">[pout]</button>
-          <button data-tag="sparkle">[sparkle]</button>
+        <div style="margin-bottom:6px;font-size:12px;color:var(--accent-2);font-weight:bold;">😊 표정 감정 (19종)</div>
+        <div class="row" id="emotion-btns"></div>
+        <div style="margin:10px 0 6px;font-size:12px;color:var(--accent-2);font-weight:bold;">🎬 행동 태그 (12종 - 서버로 보내면 상황 모션이 재생된다)</div>
+        <div class="row" id="action-btns"></div>
+        <div class="row" style="margin-top:10px;">
+          <input id="tag-input" type="text" placeholder="태그 직접 입력 (예: sparkle)" />
+          <button id="btn-tag-send">서버 경유 전송</button>
+          <button id="btn-tag-local">로컬 직접 적용</button>
         </div>
-        <div class="res" id="emotion-info">감정 버튼을 누르면 서버 경유로 감정 태그가 전송됩니다.</div>
+        <div class="res" id="emotion-info">WS가 연결되어 있으면 서버 경유(test_emotion), 아니면 아바타에 바로 적용합니다.</div>
+        <div class="row" style="margin-top:10px;">
+          <button id="btn-state-toggle">🔍 동작 상태 자동 갱신</button>
+          <button id="btn-state-refresh">새로고침</button>
+        </div>
+        <pre class="res" id="action-state" style="white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.5;">자동 갱신은 꺼져 있습니다.</pre>
       </section>
 
       <!-- 탭 -->
       <section class="card">
         <h2>④ 건드리기 반응 (모션)</h2>
         <div class="row"><button id="btn-tap">👆 탭</button></div>
-        <div class="res">로컬에서 모션 그룹(TapBody/Tap/Taphead)을 재생합니다.</div>
+        <div class="res">현재 모델에 등록된 탭 모션을 재생하고, 고개/눈 파라미터로 짧은 반응을 보탭니다. (세코·은랑은 탭 모션이 긴 특수 동작이라 파라미터 반응만)</div>
       </section>
 
       <!-- 립싱크 -->

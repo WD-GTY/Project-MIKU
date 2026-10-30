@@ -8,19 +8,48 @@ export class TransformersEmbeddingProvider extends EmbeddingProvider {
     super();
     this.model = 'Xenova/all-MiniLM-L6-v2';
     this.embedder = null;
+    this._initPromise = null;
   }
 
-  async init() {
-    if (!this.embedder) {
-      // 첫 호출 시 모델 다운로드(캐시 후 오프라인 가능)
-      this.embedder = await pipeline('feature-extraction', this.model);
+  init() {
+    if (this.embedder) return Promise.resolve();
+    if (!this._initPromise) {
+      // 동시 첫 요청은 같은 모델 로드를 기다리고, 실패한 로드는 재시도할 수 있습니다.
+      this._initPromise = Promise.resolve()
+        .then(() => pipeline('feature-extraction', this.model))
+        .then((embedder) => { this.embedder = embedder; })
+        .finally(() => { this._initPromise = null; });
     }
+    return this._initPromise;
   }
 
   async embed(texts) {
+    if (!texts || !texts.length) return [];
     await this.init();
-    const out = await this.embedder(texts, { pooling: 'mean', normalize: true });
-    const batch = Array.isArray(out) ? out : [out];
-    return batch.map((t) => Array.from(t.data));
+    const batchSize = 32;
+    const results = [];
+    let dimension = null;
+    for (let i = 0; i < texts.length; i += batchSize) {
+      const slice = texts.slice(i, i + batchSize);
+      const out = await this.embedder(slice, { pooling: 'mean', normalize: true });
+      // transformers v2의 mean pooling 결과는 Tensor[batch, dimension] 하나입니다.
+      if (out?.dims?.length !== 2 || out.dims[0] !== slice.length ||
+          !Number.isInteger(out.dims[1]) || out.dims[1] <= 0 || typeof out.tolist !== 'function') {
+        throw new Error('임베딩 Tensor의 배치 개수 또는 차원이 올바르지 않습니다.');
+      }
+      dimension ??= out.dims[1];
+      const rows = out.tolist();
+      if (out.dims[1] !== dimension || rows.length !== slice.length) {
+        throw new Error('임베딩 배치 사이의 개수 또는 차원이 일치하지 않습니다.');
+      }
+      for (const row of rows) {
+        const vector = Array.from(row);
+        if (vector.length !== dimension || !vector.every(Number.isFinite)) {
+          throw new Error('임베딩 벡터의 차원 또는 값이 올바르지 않습니다.');
+        }
+        results.push(vector);
+      }
+    }
+    return results;
   }
 }

@@ -3,9 +3,12 @@
 // 기본 모델은 Haru (실패 시 Senko 폴백) - 기존 동작 유지.
 // 인터랙션: 클릭=건드리기, 빈 공간 드래그=위치 이동, 모델 위 드래그=쓰다듬기,
 //           꾹 누르기=쓰다듬 홀딩, 더블클릭=축하.
-// 애니메이션: 커서 트래킹(머리 추적), 유휴(호흡/깜빡/좌우擺), 쓰다듬기(흔들림/기대기),
-//            상황별 모션(설명=끼리, 놀람=뒤로, 수면=졸음, 기쁨=점프 등)
-import { applyEmotion, softEmotion, playTapMotion, playPetMotion, playCelebrateMotion } from './emotions.js';
+// 동작은 레이어(유휴 < 감정 < 쓰다듬기 < 깜빡 < 반응)로 합성하며, 새 반응이 시작되면
+// 이전 반응의 예약/제어권을 거두고 현재 자세에서 시간 기반 보간으로 이어간다.
+import {
+  softEmotion, playMotion, playTapMotion, playPetMotion, playCelebrateMotion,
+  cancelMotions, configureMotionModel, PARAM_LEGACY_MAP,
+} from './emotions.js';
 
 export const DEFAULT_MODEL_ID = 'haru';
 const FALLBACK_MODEL_URLS = [
@@ -16,17 +19,69 @@ const FALLBACK_MODEL_URLS = [
 const DRAG_THRESHOLD_PX = 8;
 const HOLD_MS = 650;
 const PET_STROKE_PX = 220;
-const HEART_EVERY_STROKES = 1;
+const DBLCLICK_WINDOW_MS = 260;
 
-// 애니메이션 레이어 우선순위 (높을수록 우선)
-const PRIO = { idle: 0, cursor: 1, pet: 2, hold: 3, emotion: 4, motion: 5, script: 6 };
+// 애니메이션 레이어 우선순위 (높을수록 우선, 해제 시 바로 아래 레이어 값으로 자연스럽게 복귀)
+const LAYER = { idle: 0, emotion: 1, pet: 2, blink: 3, action: 4 };
+
+const TRACK_OFFSETS = {
+  ParamAngleX: '_trackAngleX',
+  ParamAngleY: '_trackAngleY',
+  ParamAngleZ: '_trackAngleZ',
+  ParamEyeBallX: '_trackEyeBallX',
+  ParamEyeBallY: '_trackEyeBallY',
+  ParamBodyAngleX: '_trackBodyAngleX',
+  ParamBodyAngleZ: '_trackBodyAngleZ',
+};
+
+const IDLE_IDS = ['ParamBodyAngleY', 'ParamAngleZ', 'ParamBodyAngleX', 'ParamMouthOpenY'];
+const BLINK_IDS = ['ParamEyeLOpen', 'ParamEyeROpen'];
+const PET_IDS = [
+  'ParamAngleX', 'ParamAngleZ', 'ParamBodyAngleX', 'ParamCheek',
+  'ParamMouthOpenY', 'ParamMouthForm', 'ParamEyeLOpen', 'ParamEyeROpen',
+  'ParamEyeLSmile', 'ParamEyeRSmile', 'ParamBrowLY', 'ParamBrowRY',
+];
+
+const MOUTH_IDS = ['ParamMouthOpenY', 'ParamMouthOpenY2', 'PARAM_MOUTH_OPEN_Y', 'MouthJawOpen'];
+const isMouthParam = (id) => id === 'ParamMouthOpenY' || id === 'ParamMouthOpenY2' || id === 'PARAM_MOUTH_OPEN_Y';
 
 function posKey(modelId) { return `miku_avatar_pos_${modelId || 'default'}`; }
 function zoomKey(modelId) { return `miku_avatar_zoom_${modelId || 'default'}`; }
 function modelUrlFor(models, id) { return models?.find((m) => m.id === id)?.modelUrl || null; }
 
 export const ZOOM_MIN = 0.3;
-export const ZOOM_MAX = 2.5;
+export const ZOOM_MAX = 5.5;
+
+// 모델별 시점 프리셋 (상반신 포커스 / 전신)
+// - 전신 모델(히요리, 미쿠, 은랑): 머리 상단을 56px(배지 하단)에 고정하고 상반신을 안정적으로 채움
+// - 반신 모델(하루): 이미 골반에서 잘린 모델이므로 적정 배율 적용
+const MODEL_VIEW_PRESETS = {
+  hiyori_pro: { bustZoom: 3.5, headDistRatio: 0.48, fullZoom: 1.0 },
+  hiyori:     { bustZoom: 3.5, headDistRatio: 0.48, fullZoom: 1.0 },
+  haru:       { bustZoom: 1.85, headDistRatio: 0.46, fullZoom: 1.0 },
+  miku:       { bustZoom: 3.4, headDistRatio: 0.48, fullZoom: 1.0 },
+  yinlang:    { bustZoom: 3.2, headDistRatio: 0.47, fullZoom: 1.0 },
+  senko:      { bustZoom: 3.0, headDistRatio: 0.46, fullZoom: 1.0 },
+  default:    { bustZoom: 3.4, headDistRatio: 0.48, fullZoom: 1.0 },
+};
+
+export function getViewPreset(modelId, mode) {
+  const key = (modelId || '').toLowerCase();
+  let preset = MODEL_VIEW_PRESETS[key];
+  if (!preset) {
+    if (key.includes('hiyori')) preset = MODEL_VIEW_PRESETS.hiyori_pro;
+    else if (key.includes('miku')) preset = MODEL_VIEW_PRESETS.miku;
+    else if (key.includes('yinlang') || key.includes('silverwolf')) preset = MODEL_VIEW_PRESETS.yinlang;
+    else if (key.includes('senko')) preset = MODEL_VIEW_PRESETS.senko;
+    else if (key.includes('haru')) preset = MODEL_VIEW_PRESETS.haru;
+    else preset = MODEL_VIEW_PRESETS.default;
+  }
+  const isBust = mode !== 'full';
+  return {
+    zoom: isBust ? preset.bustZoom : preset.fullZoom,
+    headDistRatio: preset.headDistRatio,
+  };
+}
 
 // 부드러운 보간 유틸
 function lerp(a, b, t) { return a + (b - a) * Math.min(1, Math.max(0, t)); }
@@ -35,6 +90,169 @@ function approach(current, target, speed) {
   if (Math.abs(d) < 0.001) return target;
   return current + d * Math.min(1, speed);
 }
+
+// [시각(ms, 값, 도달시간(ms))] 키프레임 목록 생성 도우미
+function osc(amp, cycles, period, startAt = 0, tau = null) {
+  const frames = [];
+  const reach = tau ?? Math.round(period * 0.55);
+  for (let i = 0; i < cycles; i++) {
+    frames.push([startAt + i * period, i % 2 === 0 ? -amp : amp, reach]);
+  }
+  frames.push([startAt + cycles * period, 0, Math.round(period * 1.4)]);
+  return frames;
+}
+
+// 상황별 동작 정의. tracks의 각 키프레임은 예약 취소 가능한 반응 레이어로 적용된다.
+const REACTIONS = {
+  nod: { emotion: 'smile', ms: 1200, tracks: {
+    ParamAngleY: [[0, -8, 110], [200, 3, 130], [400, -8, 110], [600, 3, 130], [800, -6, 150], [1000, 0, 240]],
+  } },
+  think: { emotion: 'think', ms: 3200, tracks: {
+    ParamAngleZ: [[0, -8, 420]], ParamAngleX: [[0, 5, 460]],
+    ParamEyeLOpen: [[0, 0.7, 360]], ParamEyeROpen: [[0, 0.7, 360]],
+    ParamBrowLY: [[0, -0.3, 380]], ParamBrowRY: [[0, -0.3, 380]], ParamMouthForm: [[0, -0.2, 420]],
+  } },
+  surprise: { emotion: 'cheer', ms: 1400, tracks: {
+    ParamEyeLOpen: [[0, 1.2, 100]], ParamEyeROpen: [[0, 1.2, 100]],
+    ParamAngleY: [[0, -12, 110]], ParamMouthOpenY: [[0, 0.3, 110]],
+    ParamBrowLY: [[0, 0.6, 110]], ParamBrowRY: [[0, 0.6, 110]],
+  } },
+  joy: { emotion: 'cheer', ms: 2100, tracks: {
+    ParamBodyAngleY: [[0, -10, 110], [200, 4, 130], [400, 0, 170], [700, -10, 110], [900, 4, 130],
+      [1100, 0, 170], [1400, -10, 110], [1600, 4, 130], [1800, 0, 220]],
+    ParamBodyAngleX: [[0, -6, 150], [350, 6, 150], [700, 0, 220]],
+  } },
+  sad: { emotion: 'sad', ms: 4200, tracks: {
+    ParamAngleY: [[0, 10, 520]], ParamAngleZ: [[0, 5, 520]],
+    ParamEyeLOpen: [[0, 0.4, 420]], ParamEyeROpen: [[0, 0.4, 420]],
+    ParamBrowLY: [[0, -0.5, 420]], ParamBrowRY: [[0, -0.5, 420]], ParamBodyAngleY: [[0, 5, 620]],
+  } },
+  angry: { emotion: 'think', ms: 1200, tracks: {
+    ParamBrowLY: [[0, -0.7, 140]], ParamBrowRY: [[0, -0.7, 140]], ParamMouthForm: [[0, -0.4, 160]],
+    ParamAngleZ: osc(4, 8, 100, 0, 70),
+  } },
+  sleepy: { emotion: 'neutral', ms: 0, tracks: {
+    ParamAngleY: [[0, 15, 900]], ParamAngleZ: [[0, 8, 900]],
+    ParamEyeLOpen: [[0, 0.15, 700]], ParamEyeROpen: [[0, 0.15, 700]],
+    ParamBodyAngleY: [[0, 8, 900]], ParamMouthOpenY: [[0, 0.08, 700]],
+  } },
+  wakeup: { emotion: 'smile', ms: 1700, tracks: {
+    ParamAngleY: [[0, -5, 220], [500, -8, 260], [1200, 0, 420]],
+    ParamBodyAngleY: [[0, -6, 240], [500, -10, 260], [1200, 0, 440]],
+    ParamEyeLOpen: [[0, 1.1, 220], [1200, 1, 320]], ParamEyeROpen: [[0, 1.1, 220], [1200, 1, 320]],
+  } },
+  greet: { emotion: 'smile', ms: 1200, tracks: {
+    ParamAngleY: [[0, 12, 200], [650, 12, 200], [950, 0, 300]],
+    ParamBodyAngleY: [[0, 6, 240], [950, 0, 320]],
+  } },
+  shake: { emotion: 'think', ms: 1100, tracks: { ParamAngleX: osc(15, 6, 150, 0, 95) } },
+  wave: { emotion: 'cheer', ms: 1650, tracks: {
+    ParamBodyAngleX: [[0, -8, 240], [1350, 0, 300]],
+    ParamAngleZ: osc(6, 8, 180, 0, 105),
+  } },
+  clap: { emotion: 'cheer', ms: 1700, tracks: {
+    ParamBodyAngleX: osc(5, 6, 250, 0, 130),
+    ParamMouthOpenY: [[0, 0.2, 130], [1400, 0.06, 240]],
+  } },
+  dance: { emotion: 'cheer', ms: 2700, tracks: {
+    ParamAngleX: [[0, -10, 160], [300, 8, 160], [600, -6, 160], [900, 10, 160], [1200, -8, 160], [1500, 6, 160], [1800, -10, 160], [2100, 8, 160], [2400, 0, 260]],
+    ParamAngleY: [[0, -5, 160], [300, 3, 160], [600, -8, 160], [900, 5, 160], [1200, 3, 160], [1500, -5, 160], [1800, -3, 160], [2100, 8, 160], [2400, 0, 260]],
+    ParamAngleZ: [[0, -8, 160], [300, 6, 160], [600, -4, 160], [900, 8, 160], [1200, -6, 160], [1500, 4, 160], [1800, -8, 160], [2100, 6, 160], [2400, 0, 260]],
+    ParamBodyAngleX: [[0, -6, 170], [300, 5, 170], [600, -4, 170], [900, 6, 170], [1200, -5, 170], [1500, 4, 170], [1800, -6, 170], [2100, 5, 170], [2400, 0, 260]],
+    ParamMouthOpenY: [[0, 0.15, 170], [2400, 0.05, 260]],
+  } },
+  explain: { emotion: 'think', ms: 2200, tracks: {
+    ParamAngleY: [[0, -8, 150], [180, 3, 160], [360, 0, 180], [600, -8, 150], [780, 3, 160], [960, 0, 180],
+      [1200, -8, 150], [1380, 3, 160], [1560, 0, 220]],
+    ParamBodyAngleX: [[0, -4, 320], [1900, 0, 380]],
+  } },
+  focus: { emotion: 'focus', ms: 2700, tracks: {
+    ParamAngleY: [[0, 5, 220]], ParamBodyAngleY: [[0, -5, 240]],
+    ParamEyeLOpen: [[0, 0.88, 200]], ParamEyeROpen: [[0, 0.88, 200]],
+    ParamBrowLY: [[0, -0.25, 220]], ParamBrowRY: [[0, -0.25, 220]],
+    ParamMouthForm: [[0, 0.1, 240]], ParamMouthOpenY: [[0, 0.02, 240]],
+  } },
+  proud: { emotion: 'proud', ms: 2400, tracks: {
+    ParamBodyAngleY: [[0, -7, 200]], ParamBodyAngleX: [[0, 4, 220]],
+    ParamAngleY: [[0, -8, 200]], ParamAngleZ: [[0, -7, 200]], ParamAngleX: [[0, 6, 220]],
+    ParamBrowLY: [[0, 0.35, 200]], ParamBrowRY: [[0, 0.35, 200]],
+    ParamMouthForm: [[0, 0.6, 200]], ParamMouthOpenY: [[0, 0.12, 220]],
+  } },
+  fighting: { emotion: 'cheer', ms: 1400, tracks: {
+    ParamBodyAngleY: [[0, -8, 110], [180, 2, 130], [380, -14, 120], [620, 4, 150], [1050, 0, 260]],
+    ParamEyeLOpen: [[0, 1.15, 120]], ParamEyeROpen: [[0, 1.15, 120]], ParamCheek: [[0, 0.35, 160]],
+    ParamMouthOpenY: [[380, 0.28, 130], [1050, 0.06, 220]], ParamMouthForm: [[380, 0.5, 140]],
+    ParamAngleY: [[380, -6, 160]],
+  } },
+  shy: { emotion: 'shy', ms: 3000, tracks: {
+    ParamCheek: [[0, 0.65, 220]], ParamAngleX: [[0, 18, 320]], ParamAngleY: [[0, 10, 320]],
+    ParamAngleZ: [[0, -6, 320]], ParamBodyAngleX: [[0, 5, 340]],
+    ParamEyeLOpen: [[0, 0.55, 260]], ParamEyeROpen: [[0, 0.55, 260]],
+    ParamMouthForm: [[0, 0.25, 260]], ParamMouthOpenY: [[0, 0.06, 260]],
+  } },
+  panic: { emotion: 'panic', ms: 1200, tracks: {
+    ParamEyeLOpen: [[0, 1.3, 100]], ParamEyeROpen: [[0, 1.3, 100]],
+    ParamBrowLY: [[0, 0.7, 100]], ParamBrowRY: [[0, 0.7, 100]],
+    ParamMouthOpenY: [[0, 0.32, 100]], ParamMouthForm: [[0, -0.3, 130]],
+    ParamAngleX: osc(14, 10, 80, 120, 50), ParamAngleZ: osc(8, 10, 80, 120, 50),
+  } },
+  curious: { emotion: 'curious', ms: 2800, tracks: {
+    ParamAngleZ: [[0, 15, 240]], ParamAngleX: [[0, -9, 260]], ParamAngleY: [[0, -3, 260]],
+    ParamEyeLOpen: [[0, 1.08, 220]], ParamEyeROpen: [[0, 0.95, 220]],
+    ParamBrowLY: [[0, 0.25, 220]], ParamBrowRY: [[0, -0.15, 220]],
+    ParamMouthOpenY: [[0, 0.12, 240]], ParamMouthForm: [[0, 0.15, 240]],
+  } },
+  dozeoff: { emotion: 'dozeoff', endEmotion: 'prev', ms: 3000, tracks: {
+    ParamAngleY: [[0, 18, 700], [1300, -12, 150], [1850, 0, 420]],
+    ParamBodyAngleY: [[0, 7, 700], [1300, -4, 170], [1850, 0, 420]],
+    ParamEyeLOpen: [[0, 0.08, 700], [1300, 1.2, 150], [1850, 0.9, 320], [2600, 1, 300]],
+    ParamEyeROpen: [[0, 0.08, 700], [1300, 1.2, 150], [1850, 0.9, 320], [2600, 1, 300]],
+    ParamBrowLY: [[1300, 0.4, 170], [1850, 0, 320]], ParamBrowRY: [[1300, 0.4, 170], [1850, 0, 320]],
+    ParamMouthForm: [[1850, 0.25, 220], [2600, 0, 320]],
+  } },
+  relieved: { emotion: 'relieved', ms: 2800, tracks: {
+    ParamAngleY: [[0, -6, 240], [500, 9, 340], [1300, 0, 440]],
+    ParamBodyAngleY: [[0, -4, 260], [500, 5, 340], [1300, 0, 440]],
+    ParamEyeLOpen: [[500, 0.25, 280], [1300, 0.85, 280]], ParamEyeROpen: [[500, 0.25, 280], [1300, 0.85, 280]],
+    ParamMouthOpenY: [[500, 0.15, 280], [1300, 0.04, 280]],
+    ParamMouthForm: [[1300, 0.4, 280], [2400, 0, 320]],
+  } },
+  pout: { emotion: 'pout', ms: 3200, tracks: {
+    ParamAngleX: [[0, -24, 280]], ParamAngleZ: [[0, -7, 280]], ParamBodyAngleX: [[0, -10, 320]],
+    ParamMouthForm: [[0, -0.5, 260]], ParamMouthOpenY: [[0, 0.04, 280]],
+    ParamBrowLY: [[0, -0.35, 260]], ParamBrowRY: [[0, -0.35, 260]],
+    ParamEyeLOpen: [[0, 0.65, 280]], ParamEyeROpen: [[0, 0.65, 280]], ParamCheek: [[0, 0.25, 320]],
+  } },
+  whisper: { emotion: 'whisper', ms: 2800, tracks: {
+    ParamBodyAngleY: [[0, -9, 260]], ParamAngleY: [[0, 6, 260]],
+    ParamAngleZ: [[0, -11, 280]], ParamAngleX: [[0, 13, 280]],
+    ParamEyeLOpen: [[0, 0.85, 240]], ParamEyeROpen: [[0, 0.1, 200]],
+    ParamMouthOpenY: [[0, 0.09, 260]], ParamMouthForm: [[0, 0.35, 260]],
+  } },
+  sparkle: { emotion: 'sparkle', ms: 2000, tracks: {
+    ParamEyeLOpen: [[0, 1.25, 130]], ParamEyeROpen: [[0, 1.25, 130]],
+    ParamBrowLY: [[0, 0.5, 150]], ParamBrowRY: [[0, 0.5, 150]], ParamCheek: [[0, 0.45, 190]],
+    ParamMouthForm: [[0, 0.6, 160]], ParamMouthOpenY: [[0, 0.22, 160]], ParamBodyAngleY: [[0, -5, 180]],
+    ParamAngleZ: osc(7, 8, 180, 120, 105),
+  } },
+  spaceout: { emotion: 'spaceout', ms: 3700, tracks: {
+    ParamAngleY: [[0, -8, 620]], ParamAngleZ: [[0, 4, 620]], ParamBodyAngleY: [[0, 3, 700]],
+    ParamEyeLOpen: [[0, 0.42, 520]], ParamEyeROpen: [[0, 0.42, 520]],
+    ParamBrowLY: [[0, 0, 520]], ParamBrowRY: [[0, 0, 520]],
+    ParamMouthOpenY: [[0, 0.12, 520]], ParamMouthForm: [[0, 0, 520]],
+  } },
+  poke: { ms: 700, tracks: {
+    ParamAngleY: [[0, 6, 100], [130, -4, 130], [280, 0, 220]],
+    ParamBodyAngleY: [[0, 4, 120], [280, 0, 240]],
+    ParamEyeLOpen: [[0, 0.35, 90], [220, 1, 200]], ParamEyeROpen: [[0, 0.35, 90], [220, 1, 200]],
+  } },
+  hold: { emotion: 'love', ms: 1600, tracks: {
+    ParamAngleZ: [[0, -5, 260]], ParamBodyAngleY: [[0, -3, 280]],
+  } },
+  celebrate: { ms: 1000, tracks: {
+    ParamBodyAngleY: [[0, -6, 130], [300, 3, 150], [600, 0, 260]],
+  } },
+};
 
 export class Live2DStage {
   constructor(canvas) {
@@ -52,23 +270,33 @@ export class Live2DStage {
     this.offsetX = 0;
     this.offsetY = 0;
     this.zoom = 1;
+    this.viewMode = 'bust'; // 'bust' (상반신 포커스) | 'full' (전신)
+    this._bustWeight = 1.0;
     this.onZoomChange = null;
+    this.onViewModeChange = null;
+    this._camAnim = null;
+    this._smoothedLipOpen = 0;
     this._baseW = 1;
     this._baseH = 1;
 
     // 커서 트래킹
     this._cursorX = 0;
     this._cursorY = 0;
-    this._cursorOnCanvas = false;
+    this._cursorScreenX = 0;
+    this._cursorScreenY = 0;
+    this._cursorInWindow = false;
+    this._lastMouseMove = 0;
+    this._trackIntensity = 0; // 0~1
     this._trackAngleX = 0;
     this._trackAngleY = 0;
-    this._trackTargetX = 0;
-    this._trackTargetY = 0;
-    this._trackIntensity = 0; // 0~1, 거리에 반비례
+    this._trackAngleZ = 0;
+    this._trackEyeBallX = 0;
+    this._trackEyeBallY = 0;
+    this._trackBodyAngleX = 0;
+    this._trackBodyAngleZ = 0;
 
     // 유휴 애니메이션
     this._idleTime = 0;
-    this._idlePhase = 0;
     this._blinkTimer = 0;
     this._blinkState = 0; // 0=열림, 1=닫는중, 2=열리는중
     this._breathPhase = 0;
@@ -82,17 +310,28 @@ export class Live2DStage {
     this._petSwayPhase = 0;
     this._petCursorDx = 0;
 
-    // 파라미터 보간 시스템
-    this._paramTarget = {}; // { paramId: { value, prio, decay } }
-    this._paramCurrent = {}; // { paramId: currentValue }
+    // 파트 불투명도 부드러운 보간 (팔 전환 팝 현상 방지)
+    this._partOpacities = {};
+    this._lastApplyTime = 0;
+
+    // 파라미터 레이어 합성: id -> Map(우선순위 -> {value, tau}), id -> 보간된 현재 값
+    this._claims = {};
+    this._pose = {};
+    this._emotionIds = new Set();
+    this._emotionTag = 'neutral';
+    this._emotionDecayTimer = null;
+    this._reaction = null;
+    this._reactionPrevEmotion = null;
 
     // 인터랙션 상태
     this._press = null;
     this._holdTimer = null;
     this._holdFired = false;
+    this._tapTimer = null;
 
     // 티커
     this._boundTick = this._tick.bind(this);
+    this._boundApplyParams = this._applyModelParams.bind(this);
   }
 
   // ========== 초기화 ==========
@@ -177,7 +416,6 @@ export class Live2DStage {
     this.modelUrl = url;
     this.modelId = id;
     this._attachModel();
-    this._resetAnimState();
     this._startTicker();
     this.setEmotion('neutral');
     return { id: this.modelId, url: this.modelUrl };
@@ -194,21 +432,42 @@ export class Live2DStage {
   }
 
   _attachModel() {
+    this._resetAnimState();
+    configureMotionModel(this.model, this.modelId);
     this._loadOffset();
     this._loadZoom();
-    this._baseW = this.model.width || 1;
-    this._baseH = this.model.height || 1;
+    // 모델의 기본 비스케일링 크기(LocalBounds)를 안전하게 확보하여 비율 왜곡 방지
+    try { this.model.scale.set(1); } catch {}
+    const bounds = typeof this.model.getLocalBounds === 'function' ? this.model.getLocalBounds() : null;
+    this._baseW = bounds?.width || this.model.width || 1;
+    this._baseH = bounds?.height || this.model.height || 1;
     this.app.stage.addChild(this.model);
     this.model.anchor.set(0.5, 0.5);
-    this._fit();
-    // 모션 파일의 ParamMouthOpenY 0 덮어쓰기 방지 및 물리 엔진 전달용 (모션 직후)
-    this.model.internalModel.on('afterMotionUpdate', () => this._applyLipSync());
-    // 최종 렌더 직전 표정 및 립싱크 확정 (렌더 직전)
-    this.model.internalModel.on('beforeModelUpdate', () => this._applyModelParams());
+
+    const savedMode = localStorage.getItem('miku_avatar_view_mode') || 'bust';
+    // 구버전 고정값(2.25 이하) 또는 구버전 오프셋(수백 px) 캐시는 새 프리셋으로 자동 초기화
+    const isOldBroken = savedMode === 'bust' && (this.zoom <= 2.5 || Math.abs(this.offsetY) > 150);
+    const hasCustomOffset = localStorage.getItem(posKey(this.modelId)) !== null;
+    if (!hasCustomOffset || isOldBroken) {
+      this.offsetX = 0;
+      this.offsetY = 0;
+      this.setViewMode(savedMode, { animated: false, save: true });
+    } else {
+      this.viewMode = savedMode;
+      this._bustWeight = savedMode === 'full' ? 0 : 1;
+      this._fit();
+    }
+
+    // 최종 렌더 직전에 레이어 합성 결과(표정/반응/시선/립싱크)를 확정한다.
+    this.model.internalModel.on('beforeModelUpdate', this._boundApplyParams);
   }
 
   _detachCurrent() {
     if (!this.model) return;
+    clearTimeout(this._emotionDecayTimer);
+    this._emotionDecayTimer = null;
+    this._clearReaction();
+    try { this.model.internalModel?.off?.('beforeModelUpdate', this._boundApplyParams); } catch {}
     try { this.app.stage.removeChild(this.model); } catch {}
     try { this.model.destroy({ children: true, texture: true, baseTexture: true }); } catch {
       try { this.model.destroy(); } catch {}
@@ -219,16 +478,33 @@ export class Live2DStage {
   _resetAnimState() {
     this._trackAngleX = 0;
     this._trackAngleY = 0;
+    this._trackAngleZ = 0;
+    this._trackEyeBallX = 0;
+    this._trackEyeBallY = 0;
+    this._trackBodyAngleX = 0;
+    this._trackBodyAngleZ = 0;
     this._trackIntensity = 0;
+    this._lastMouseMove = 0;
     this._petIntensity = 0;
     this._petStrokes = 0;
+    this._partOpacities = {};
+    this._lastApplyTime = 0;
     this._idleTime = 0;
     this._blinkTimer = 2 + Math.random() * 4;
-    this._paramTarget = {};
-    this._paramCurrent = {};
+    this._blinkState = 0;
+    this._smoothedLipOpen = 0;
+    this._claims = {};
+    this._pose = {};
+    this._emotionIds = new Set();
+    this._emotionTag = 'neutral';
+    clearTimeout(this._emotionDecayTimer);
+    this._emotionDecayTimer = null;
+    this._reactionPrevEmotion = null;
+    this.persistParams = {};
+    this._clearReaction();
   }
 
-  // ========== 파라미터 시스템 ==========
+  // ========== 파라미터 레이어 시스템 ==========
 
   // 안전하게 파라미터 설정 (Cubism 4 / Cubism 2 호환)
   _setParam(id, value) {
@@ -236,69 +512,139 @@ export class Live2DStage {
     if (!core) return;
     try { core.setParameterValueById?.(id, value, 1); } catch {}
     try { core.setParamFloat?.(id, value, 1); } catch {}
+    const alt = PARAM_LEGACY_MAP?.[id];
+    if (alt) {
+      try { core.setParameterValueById?.(alt, value, 1); } catch {}
+      try { core.setParamFloat?.(alt, value, 1); } catch {}
+    }
   }
 
-  // 립싱크 전용: 모션/물리/모델 차이(Haru/Senko/Yinlang)에 영향받지 않고 확실하게 입을 개폐
-  _setMouthOpen(val) {
+  _readParam(id) {
     const core = this.model?.internalModel?.coreModel;
-    if (!core) return;
-    const clamped = Math.max(0, Math.min(1, val));
-    // Cubism 4 (ParamMouthOpenY, ParamMouthOpenY2, MouthJawOpen) 및 Cubism 2 (PARAM_MOUTH_OPEN_Y) 동시 반영
-    const mouthIds = ['ParamMouthOpenY', 'ParamMouthOpenY2', 'PARAM_MOUTH_OPEN_Y', 'MouthJawOpen'];
-    for (const id of mouthIds) {
-      try { core.setParameterValueById?.(id, clamped, 1); } catch {}
-      try { core.setParamFloat?.(id, clamped, 1); } catch {}
+    if (!core) return 0;
+    try {
+      const v = core.getParameterValueById?.(id);
+      if (Number.isFinite(v)) return v;
+    } catch {}
+    try {
+      const v = core.getParamFloat?.(id);
+      if (Number.isFinite(v)) return v;
+    } catch {}
+    return 0;
+  }
+
+  // 제어권이 없어진 파라미터의 기준 값 (눈은 0이 감긴 상태이므로 1이 기준)
+  _restValue(id) {
+    return (id === 'ParamEyeLOpen' || id === 'ParamEyeROpen' || id === 'PARAM_EYE_L_OPEN' || id === 'PARAM_EYE_R_OPEN') ? 1 : 0;
+  }
+
+  // 특정 레이어가 파라미터 값을 소유하도록 한다. 이미 보간 중인 값에서 이어서 움직인다.
+  _setLayer(id, prio, value, tau = 260) {
+    const layers = this._claims[id] || (this._claims[id] = new Map());
+    const cur = layers.get(prio);
+    if (cur) {
+      cur.value = value;
+      cur.tau = Math.max(16, tau);
+    } else {
+      layers.set(prio, { value, tau: Math.max(16, tau) });
+    }
+    if (this._pose[id] === undefined) this._pose[id] = this._readParam(id) - this._cursorOffset(id);
+  }
+
+  // 시선 추적은 최종 값에 가산되므로, 모델에서 값을 읽을 때 그 성분을 빼야 중복 적용되지 않는다.
+  _cursorOffset(id) {
+    if (this._trackIntensity <= 0.01) return 0;
+    const key = TRACK_OFFSETS[id];
+    return key ? (this[key] ?? 0) : 0;
+  }
+
+  // 레이어 소유를 해제하면 바로 아래 레이어(감정 → 유휴) 값으로 보간되어 이어진다.
+  _releaseLayer(id, prio) {
+    const layers = this._claims[id];
+    if (!layers || !layers.has(prio)) return;
+    layers.delete(prio);
+    if (!layers.size) delete this._claims[id];
+  }
+
+  _releaseIds(ids, prio) {
+    for (const id of ids) this._releaseLayer(id, prio);
+  }
+
+  // 발화 중이 아니면 립싱크 파라미터도 다른 파라미터와 똑같이 레이어로 합성된다.
+  // 이전 감정이 쓴 파라미터는 새 감정에 없으면 소유를 거두어 자세가 남지 않게 한다.
+  _applyEmotionClaims(params) {
+    const nextIds = new Set(Object.keys(params));
+    for (const id of this._emotionIds) {
+      if (!nextIds.has(id)) this._releaseLayer(id, LAYER.emotion);
+    }
+    this._emotionIds = nextIds;
+    for (const [id, value] of Object.entries(params)) {
+      this._setLayer(id, LAYER.emotion, value, isMouthParam(id) ? 220 : 300);
     }
   }
 
-  // 발화 중 및 오디오 볼륨 기반 실시간 입 개폐량 계산
-  _computeLipOpen() {
-    let open = 0;
-    // 1) 오디오 볼륨(RMS) 기반 다이내믹 립싱크
-    if (this.lipVolume > 0.008) {
-      // 0.008~1.0을 0~1.0의 시원한 개폐 범위로 비선형 증폭 (최대 1.0)
-      open = Math.min(1, Math.pow(this.lipVolume, 0.85) * 1.35);
+  // ========== 반응 수명 주기 ==========
+
+  _beginReaction(name, durationMs = 0, endEmotion = null) {
+    this._clearReaction();
+    const reaction = {
+      name,
+      timers: new Set(),
+      ids: new Set(),
+      prevEmotion: this._reactionPrevEmotion ?? this._emotionTag,
+      endEmotion,
+      endsAt: durationMs > 0 ? Date.now() + durationMs : 0,
+    };
+    this._reactionPrevEmotion = null;
+    this._reaction = reaction;
+    if (durationMs > 0) {
+      this._schedule(() => this._endReaction(reaction), durationMs);
     }
-
-    // 2) 말하고 있는 상태(isSpeaking)일 때:
-    // 자음/숨고르기 등으로 볼륨이 순간 낮아져도 최소 음절 개폐 애니메이션 유지 (초당 약 4~6회 발화 리듬)
-    if (this.isSpeaking) {
-      const t = performance.now();
-      const rhythm1 = Math.sin(t * 0.024) * 0.5 + 0.5;
-      const rhythm2 = Math.sin(t * 0.039) * 0.25;
-      const syllabic = Math.max(0.12, Math.min(0.85, rhythm1 * 0.6 + rhythm2));
-      open = Math.max(open, syllabic);
-    }
-    return open;
+    return reaction;
   }
 
-  // 모션 직후 적용 (모션 파일의 0 덮어쓰기 무력화 + 물리 연산에 입 열림 전달)
-  _applyLipSync() {
-    const open = this._computeLipOpen();
-    if (open > 0.01 || this.isSpeaking) {
-      this._setMouthOpen(open);
-    }
+  // 현재 반응에 묶인 예약 작업. 반응이 바뀌면 함께 취소된다.
+  _schedule(fn, delayMs) {
+    const reaction = this._reaction;
+    if (!reaction) { fn(); return null; }
+    const id = setTimeout(() => {
+      if (!reaction.timers.has(id)) return;
+      reaction.timers.delete(id);
+      if (this._reaction === reaction) fn();
+    }, delayMs);
+    reaction.timers.add(id);
+    return id;
   }
 
-  // 보간된 파라미터 설정 (decelayer 없이 즉시)
-  _setParamImmediate(id, value, prio = 0) {
-    this._paramTarget[id] = { value, prio, decay: 0 };
-    this._paramCurrent[id] = value;
-    this._setParam(id, value);
+  _actAt(id, value, tau, delayMs) {
+    const reaction = this._reaction;
+    if (!reaction) return;
+    const apply = () => {
+      reaction.ids.add(id);
+      this._setLayer(id, LAYER.action, value, tau);
+    };
+    if (delayMs <= 0) apply();
+    else this._schedule(apply, delayMs);
   }
 
-  // 보간된 파라미터 설정 (decelayer 적용)
-  _setParamSmooth(id, value, prio = 0, speed = 0.12) {
-    const cur = this._paramTarget[id];
-    if (cur && cur.prio > prio) return; // 더 높은 우선순위가 있으면 무시
-    this._paramTarget[id] = { value, prio, decay: 0, speed };
+  _clearReaction() {
+    const reaction = this._reaction;
+    if (!reaction) return;
+    this._reaction = null;
+    for (const id of reaction.timers) clearTimeout(id);
+    reaction.timers.clear();
+    for (const id of reaction.ids) this._releaseLayer(id, LAYER.action);
+    reaction.ids.clear();
   }
 
-  // 파라미터를 원래대로 감쇠
-  _decayParam(id, speed = 0.06) {
-    const cur = this._paramTarget[id];
-    if (!cur) return;
-    cur.decay = speed;
+  _endReaction(reaction) {
+    if (this._reaction !== reaction) return;
+    this._reaction = null;
+    for (const id of reaction.ids) this._releaseLayer(id, LAYER.action);
+    reaction.ids.clear();
+    // 동작성 반응(꾸벅 졸기 등)은 얼굴을 남기지 않고 이전 감정으로 돌아간다.
+    const target = reaction.endEmotion === 'prev' ? reaction.prevEmotion : null;
+    if (target && target !== this._emotionTag) this.setEmotionSoft(target);
   }
 
   // ========== 메인 파라미터 적용 (beforeModelUpdate) ==========
@@ -307,22 +653,84 @@ export class Live2DStage {
     const core = this.model?.internalModel?.coreModel;
     if (!core) return;
 
-    // persistParams: 감정 시스템에서 설정한 악센트 파라미터 적용
-    // (단, 립싱크 파라미터는 음성/발화 애니메이션이 전담하므로 고정값 덮어쓰기 제외)
-    for (const [id, value] of Object.entries(this.persistParams)) {
-      if (id === 'ParamMouthOpenY' || id === 'ParamMouthOpenY2' || id === 'PARAM_MOUTH_OPEN_Y') continue;
-      try { core.setParameterValueById?.(id, value, 1); } catch {}
-      try { core.setParamFloat?.(id, value, 1); } catch {}
+    // 은랑(yinlang) 워터마크/도장 레이어 매 프레임 투명도 0 강제 유지
+    if (this.modelId === 'yinlang') {
+      try {
+        if (typeof core.setPartOpacityById === 'function') {
+          core.setPartOpacityById('Part19', 0);
+          core.setPartOpacityById('Part20', 0);
+        }
+        this._setParam('key12', 0);
+      } catch {}
     }
 
-    // 최종 립싱크 반영 (말할 때 모션에 입이 굳지 않도록 최우선 보장)
-    const open = this._computeLipOpen();
-    if (open > 0.01 || this.isSpeaking) {
-      this._setMouthOpen(open);
+    // 파트 불투명도 부드러운 전환 보간 (팔 등 포즈 전환 시 순간적인 깜빡임/팝핑 방지)
+    const now = performance.now();
+    const dtSec = this._lastApplyTime ? Math.min(0.1, (now - this._lastApplyTime) / 1000) : (1 / 60);
+    this._lastApplyTime = now;
+    const partCount = core.getPartCount?.() || 0;
+    for (let i = 0; i < partCount; i++) {
+      const target = core.getPartOpacityByIndex(i);
+      if (this._partOpacities[i] === undefined) {
+        this._partOpacities[i] = target;
+      } else {
+        const next = approach(this._partOpacities[i], target, dtSec * 7);
+        this._partOpacities[i] = next;
+        core.setPartOpacityByIndex(i, next);
+      }
+    }
+
+    for (const [id, value] of Object.entries(this._pose)) this._setParam(id, value);
+
+    // 시선/고개 추정은 감정·반응 자세 위에 얹히는 가산 오프셋이다.
+    if (this._trackIntensity > 0.01) {
+      for (const [id, key] of Object.entries(TRACK_OFFSETS)) {
+        this._setParam(id, (this._pose[id] ?? 0) + this[key]);
+      }
+    }
+
+    // 입: 발화/음성이 있으면 립싱크가 전담, 없으면 합성된 값(또는 대기 기본값)을 쓴다.
+    if (this.isSpeaking || this.lipVolume > 0.008) {
+      this._setMouthOpen(this._computeLipOpen());
     } else {
-      // 발화 중이 아닐 때는 감정별 기본 대기 입 크기
-      const base = this.persistParams.ParamMouthOpenY ?? 0.04;
-      this._setMouthOpen(base);
+      this._setMouthOpen(this._pose.ParamMouthOpenY ?? 0.04);
+    }
+  }
+
+  // ========== 립싱크 ==========
+
+  // 발화 중 및 오디오 볼륨 기반 실시간 입 개폐량 계산 (엔벨로프 필터 적용)
+  _computeLipOpen() {
+    let targetOpen = 0;
+    // 1) 오디오 볼륨(RMS) 기반 다이내믹 립싱크 (자연스러운 지수 곡선 매핑)
+    if (this.lipVolume > 0.008) {
+      targetOpen = Math.min(1, Math.pow(this.lipVolume, 0.78) * 1.45);
+    }
+
+    // 2) 발화 상태(isSpeaking) 시 부드러운 음절 리듬 보조
+    if (this.isSpeaking && targetOpen < 0.06) {
+      // 자음/숨고르기 구간에서도 살짝 열어두어 기계적 끊김 방지
+      const t = performance.now();
+      targetOpen = Math.max(targetOpen, Math.sin(t * 0.016) * 0.08 + 0.12);
+    }
+
+    // 엔벨로프 필터 (빠른 어택, 부드러운 릴리즈)
+    if (this._smoothedLipOpen === undefined) this._smoothedLipOpen = 0;
+    const speed = targetOpen > this._smoothedLipOpen ? 0.35 : 0.18;
+    this._smoothedLipOpen += (targetOpen - this._smoothedLipOpen) * speed;
+
+    return this._smoothedLipOpen;
+  }
+
+  // 립싱크 전용: 모션/물리/모델 차이(Haru/Senko/Yinlang)에 영향받지 않고 확실하게 입을 개폐
+  _setMouthOpen(val) {
+    const core = this.model?.internalModel?.coreModel;
+    if (!core) return;
+    const clamped = Math.max(0, Math.min(1, val));
+    // Cubism 4 / Cubism 2 파라미터 ID를 모두 반영 (미쿠는 구버전 ID만 존재)
+    for (const id of MOUTH_IDS) {
+      try { core.setParameterValueById?.(id, clamped, 1); } catch {}
+      try { core.setParamFloat?.(id, clamped, 1); } catch {}
     }
   }
 
@@ -339,95 +747,150 @@ export class Live2DStage {
   _tick(dt) {
     if (!this.model) return;
     const sec = dt / 60;
+    const dtMs = Math.max(1, dt * (1000 / 60));
     const now = Date.now();
 
-    this._tickCursorTracking(sec);
+    this._tickCursorTracking(sec, now);
     this._tickIdle(sec, now);
     this._tickPetting(sec);
-    this._tickParamInterpolation(sec);
+    this._tickBlend(dtMs);
   }
 
-  // --- 커서 트래킹 ---
-  _tickCursorTracking(sec) {
-    if (!this._cursorOnCanvas || !this.model) {
+  // 레이어 목표값으로 시간 기반 지수 보간 (프레임 레이트와 무관하게 동일하게 움직인다)
+  _tickBlend(dtMs) {
+    for (const id of Object.keys(this._pose)) {
+      const layers = this._claims[id];
+      let best = null;
+      let bestPrio = -Infinity;
+      if (layers) {
+        for (const [prio, layer] of layers) {
+          if (prio > bestPrio) { bestPrio = prio; best = layer; }
+        }
+      }
+      const cur = this._pose[id];
+      if (!best) {
+        // 소유자가 사라진 파라미터는 기준 자세로 천천히 알계인한 뒤 제어에서 뺀다.
+        const rest = this._restValue(id);
+        const next = rest + (cur - rest) * Math.exp(-dtMs / 320);
+        if (Math.abs(next - rest) < 0.01) delete this._pose[id];
+        else this._pose[id] = next;
+        continue;
+      }
+      const k = 1 - Math.exp(-dtMs / best.tau);
+      const next = cur + (best.value - cur) * k;
+      this._pose[id] = Math.abs(best.value - next) < 0.0005 ? best.value : next;
+    }
+  }
+
+  // --- 커서 트래킹 (스프링 댐핑 보간 및 자연스러운 각도) ---
+  _tickCursorTracking(sec, now = Date.now()) {
+    const isMouseIdle = (now - this._lastMouseMove) > 4000;
+    if (!this._cursorInWindow || isMouseIdle || !this.model) {
       this._trackIntensity = approach(this._trackIntensity, 0, sec * 3);
-      if (this._trackIntensity < 0.01) return;
+      if (this._trackIntensity < 0.01) {
+        this._trackAngleX = approach(this._trackAngleX, 0, sec * 4);
+        this._trackAngleY = approach(this._trackAngleY, 0, sec * 4);
+        this._trackAngleZ = approach(this._trackAngleZ, 0, sec * 4);
+        this._trackEyeBallX = approach(this._trackEyeBallX, 0, sec * 5);
+        this._trackEyeBallY = approach(this._trackEyeBallY, 0, sec * 5);
+        this._trackBodyAngleX = approach(this._trackBodyAngleX, 0, sec * 4);
+        this._trackBodyAngleZ = approach(this._trackBodyAngleZ, 0, sec * 4);
+        return;
+      }
+    } else {
+      this._trackIntensity = approach(this._trackIntensity, 1, sec * 5);
     }
 
-    // 모델 중앙 기준 상대 좌표 (-1 ~ 1 범위로 정규화)
-    const cx = this.app.renderer.width / 2 + this.offsetX;
-    const cy = this.app.renderer.height / 2 + this.offsetY;
-    const dx = this._cursorX - cx;
-    const dy = this._cursorY - cy;
-    const maxDist = Math.max(this.app.renderer.width, this.app.renderer.height) * 0.5;
+    // 모델 중심 화면 좌표 (얼굴 높이 기준)
+    const rect = this.canvas.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2 + this.offsetX;
+    const cy = rect.top + rect.height * 0.38 + this.offsetY;
+    const dx = this._cursorScreenX - cx;
+    const dy = this._cursorScreenY - cy;
 
-    // 거리 기반 강도 (가까울수록 강함)
-    const dist = Math.hypot(dx, dy);
-    const proximity = Math.max(0, 1 - dist / (maxDist * 0.6));
-    this._trackIntensity = approach(this._trackIntensity, proximity, sec * 4);
+    // 반응 반경 및 데드존 (미세한 떨림 방지)
+    const maxDistX = Math.max(220, (window.innerWidth || 800) * 0.4);
+    const maxDistY = Math.max(180, (window.innerHeight || 600) * 0.4);
+    let normX = Math.max(-1, Math.min(1, dx / maxDistX));
+    let normY = Math.max(-1, Math.min(1, dy / maxDistY));
 
-    // 목표 각도 (커서 방향으로 고개 돌리기, 최대 ±30도)
-    const maxAngle = 30;
-    this._trackTargetX = Math.max(-maxAngle, Math.min(maxAngle, (dx / maxDist) * maxAngle * 2));
-    this._trackTargetY = Math.max(-maxAngle, Math.min(maxAngle, (-dy / maxDist) * maxAngle * 1.5));
+    if (Math.abs(normX) < 0.03) normX = 0;
+    if (Math.abs(normY) < 0.03) normY = 0;
 
-    // 부드럽게 보간
-    const speed = this._press?.dragging ? 0.18 : 0.08;
-    this._trackAngleX = approach(this._trackAngleX, this._trackTargetX * this._trackIntensity, sec * 8 * speed);
-    this._trackAngleY = approach(this._trackAngleY, this._trackTargetY * this._trackIntensity, sec * 8 * speed);
+    // 자연스럽고 안정적인 시선/고개 각도 (과도한 꺾임 방지)
+    const targetAngleX = normX * 24 * this._trackIntensity;
+    const targetAngleY = -normY * 18 * this._trackIntensity;
+    const targetAngleZ = normX * 6 * this._trackIntensity;
+    const targetEyeBallX = normX * 0.75 * this._trackIntensity;
+    const targetEyeBallY = -normY * 0.75 * this._trackIntensity;
+    const targetBodyAngleX = normX * 8 * this._trackIntensity;
+    const targetBodyAngleZ = normX * 3 * this._trackIntensity;
 
-    this._setParam('ParamAngleX', this._trackAngleX);
-    this._setParam('ParamAngleY', this._trackAngleY);
+    // 스프링 댐핑 (LERP 보간)으로 유기적인 감속 이동
+    const dampFactor = Math.min(1, sec * (this._press?.dragging ? 16 : 8));
+    this._trackAngleX += (targetAngleX - this._trackAngleX) * dampFactor;
+    this._trackAngleY += (targetAngleY - this._trackAngleY) * dampFactor;
+    this._trackAngleZ += (targetAngleZ - this._trackAngleZ) * dampFactor;
+    this._trackEyeBallX += (targetEyeBallX - this._trackEyeBallX) * Math.min(1, dampFactor * 1.2);
+    this._trackEyeBallY += (targetEyeBallY - this._trackEyeBallY) * Math.min(1, dampFactor * 1.2);
+    this._trackBodyAngleX += (targetBodyAngleX - this._trackBodyAngleX) * Math.min(1, dampFactor * 0.8);
+    this._trackBodyAngleZ += (targetBodyAngleZ - this._trackBodyAngleZ) * Math.min(1, dampFactor * 0.8);
   }
 
   // --- 유휴 애니메이션 ---
   _tickIdle(sec, now) {
+    const isMotionPlaying = (this.model?.internalModel?.motionManager?.state?.currentPriority > 1) || Boolean(this._reaction);
     const idleMs = now - this._lastInteraction;
-    if (idleMs < 2000) return; // 상호작용 후 2초는 유휴 안 함
+    if (idleMs < 2000 || isMotionPlaying) {
+      this._releaseIds(IDLE_IDS, LAYER.idle);
+      return; // 상호작용 직후 또는 액션 모션/반응 재생 중에는 유휴 자세를 붙잡지 않는다
+    }
 
     this._idleTime += sec;
 
     // 호흡 (ParamBodyAngleY 미세 변화)
     this._breathPhase += sec * 1.8;
-    const breath = Math.sin(this._breathPhase) * 2;
-    this._setParamSmooth('ParamBodyAngleY', breath, PRIO.idle, 0.04);
+    this._setLayer('ParamBodyAngleY', LAYER.idle, Math.sin(this._breathPhase) * 2, 320);
 
     // 좌우 가벼운 흔들림 (ParamAngleZ)
     this._swayPhase += sec * 0.7;
     const sway = Math.sin(this._swayPhase) * 3 + Math.sin(this._swayPhase * 1.7) * 1.5;
-    this._setParamSmooth('ParamAngleZ', sway, PRIO.idle, 0.03);
+    this._setLayer('ParamAngleZ', LAYER.idle, sway, 420);
 
     // 어깨 움직임 (ParamBodyAngleX)
-    const shoulder = Math.sin(this._swayPhase * 0.5) * 2;
-    this._setParamSmooth('ParamBodyAngleX', shoulder, PRIO.idle, 0.025);
+    this._setLayer('ParamBodyAngleX', LAYER.idle, Math.sin(this._swayPhase * 0.5) * 2, 480);
 
-    // 눈깜빡 (랜덤 간격)
+    // 미세 입 움직임 (말하지 않고 소리가 없을 때만 살짝)
+    if (!this.isSpeaking && this.lipVolume <= 0.008) {
+      this._setLayer('ParamMouthOpenY', LAYER.idle, 0.04 + Math.sin(this._breathPhase * 0.3) * 0.02, 380);
+    }
+
+    this._tickBlink(sec);
+  }
+
+  // 깜빡임은 감정/반응 눈값 위에 얹었다가 해제하면 아래 레이어로 돌아간다.
+  _tickBlink(sec) {
     this._blinkTimer -= sec;
     if (this._blinkTimer <= 0 && this._blinkState === 0) {
       this._blinkState = 1;
       this._blinkTimer = 0.12; // 닫히는 시간
     }
     if (this._blinkState === 1) {
-      this._setParamSmooth('ParamEyeLOpen', 0.1, PRIO.idle + 0.5, 0.5);
-      this._setParamSmooth('ParamEyeROpen', 0.1, PRIO.idle + 0.5, 0.5);
+      this._setLayer('ParamEyeLOpen', LAYER.blink, 0.1, 70);
+      this._setLayer('ParamEyeROpen', LAYER.blink, 0.1, 70);
       if (this._blinkTimer <= 0) {
         this._blinkState = 2;
         this._blinkTimer = 0.1;
       }
     }
     if (this._blinkState === 2) {
-      this._setParamSmooth('ParamEyeLOpen', 1, PRIO.idle + 0.5, 0.4);
-      this._setParamSmooth('ParamEyeROpen', 1, PRIO.idle + 0.5, 0.4);
+      this._setLayer('ParamEyeLOpen', LAYER.blink, 1, 90);
+      this._setLayer('ParamEyeROpen', LAYER.blink, 1, 90);
       if (this._blinkTimer <= 0) {
         this._blinkState = 0;
         this._blinkTimer = 2 + Math.random() * 5; // 다음 깜빡까지
+        this._releaseIds(BLINK_IDS, LAYER.blink);
       }
-    }
-
-    // 미세 입 움직임 (말하지 않고 소리가 없을 때만 살짝)
-    if (!this.isSpeaking && this.lipVolume <= 0.008) {
-      const mouthIdle = 0.04 + Math.sin(this._breathPhase * 0.3) * 0.02;
-      this._setParamSmooth('ParamMouthOpenY', mouthIdle, PRIO.idle, 0.03);
     }
   }
 
@@ -436,62 +899,33 @@ export class Live2DStage {
     if (this._petIntensity <= 0) return;
 
     // 쓰다듬기 강도 감쇠
-    this._petIntensity = approach(this._petIntensity, 0, sec * 0.8);
-
-    // 커서 방향으로 고개 기울이기 (쓰다듬는 방향 추적)
-    this._petSwayPhase += sec * 6;
-    const petSway = Math.sin(this._petSwayPhase) * 8 * this._petIntensity;
-    const petTilt = this._petCursorDx * 12 * this._petIntensity;
-
-    this._setParamSmooth('ParamAngleX', petSway + petTilt, PRIO.pet, 0.15);
-    this._setParamSmooth('ParamAngleZ', Math.sin(this._petSwayPhase * 0.7) * 5 * this._petIntensity, PRIO.pet, 0.12);
-
-    // 몸이 커서 방향으로 기울기
-    this._setParamSmooth('ParamBodyAngleX', this._petCursorDx * 8 * this._petIntensity, PRIO.pet, 0.1);
-
-    // 뺨 주홍 ( ParamCheek )
-    this._setParamSmooth('ParamCheek', 0.4 * this._petIntensity, PRIO.pet, 0.08);
-
-    // 기쁨 표정 (입 벌림 + 눈)
-    if (!this.isSpeaking && this.lipVolume <= 0.008) {
-      this._setParamSmooth('ParamMouthOpenY', 0.15 + this._petIntensity * 0.1, PRIO.pet, 0.1);
+    this._petIntensity = approach(this._petIntensity, 0, sec * 0.7);
+    if (this._petIntensity < 0.02) {
+      this._petIntensity = 0;
+      this._releaseIds(PET_IDS, LAYER.pet); // 제어권을 감정/시선에 돌려준다
+      return;
     }
-    this._setParamSmooth('ParamMouthForm', 0.3 * this._petIntensity, PRIO.pet, 0.1);
-    this._setParamSmooth('ParamEyeLOpen', 0.85 + this._petIntensity * 0.1, PRIO.pet, 0.08);
-    this._setParamSmooth('ParamEyeROpen', 0.85 + this._petIntensity * 0.1, PRIO.pet, 0.08);
-    this._setParamSmooth('ParamBrowLY', 0.3 * this._petIntensity, PRIO.pet, 0.08);
-    this._setParamSmooth('ParamBrowRY', 0.3 * this._petIntensity, PRIO.pet, 0.08);
-  }
 
-  // --- 파라미터 보간 (매 프레임) ---
-  _tickParamInterpolation(sec) {
-    const speakingNow = this.isSpeaking || this.lipVolume > 0.008;
-    for (const [id, target] of Object.entries(this._paramTarget)) {
-      // 발화 중일 때는 립싱크 엔진이 입 개폐를 전담하므로 모션 보간에서 제외 (모션 중 입 굳음 방지)
-      if (speakingNow && (id === 'ParamMouthOpenY' || id === 'ParamMouthOpenY2' || id === 'PARAM_MOUTH_OPEN_Y')) {
-        continue;
-      }
-      if (target.decay > 0) {
-        // 감쇠 중: 0으로 수렴
-        const cur = this._paramCurrent[id] ?? 0;
-        const next = approach(cur, 0, target.decay);
-        this._paramCurrent[id] = next;
-        this._setParam(id, next);
-        if (Math.abs(next) < 0.01) {
-          delete this._paramTarget[id];
-          delete this._paramCurrent[id];
-        }
-      } else if (target.speed) {
-        // 부드러운 보간
-        const cur = this._paramCurrent[id] ?? 0;
-        const next = approach(cur, target.value, target.speed);
-        this._paramCurrent[id] = next;
-        this._setParam(id, next);
-      } else {
-        // 즉시 적용
-        this._paramCurrent[id] = target.value;
-        this._setParam(id, target.value);
-      }
+    // 커서 방향으로 고개 기울이기 (쓰다듬는 방향 추적 - 부드럽고 다정한 흔들림)
+    this._petSwayPhase += sec * 2.2;
+    const petSway = Math.sin(this._petSwayPhase) * 4 * this._petIntensity;
+    const petTilt = this._petCursorDx * 8 * this._petIntensity;
+
+    this._setLayer('ParamAngleX', LAYER.pet, petSway + petTilt, 180);
+    this._setLayer('ParamAngleZ', LAYER.pet, Math.sin(this._petSwayPhase * 0.7) * 4 * this._petIntensity, 200);
+    this._setLayer('ParamBodyAngleX', LAYER.pet, this._petCursorDx * 6 * this._petIntensity, 240);
+    this._setLayer('ParamCheek', LAYER.pet, 0.55 * this._petIntensity, 240);
+    this._setLayer('ParamMouthForm', LAYER.pet, 0.45 * this._petIntensity, 200);
+    this._setLayer('ParamEyeLSmile', LAYER.pet, 0.9 * this._petIntensity, 200);
+    this._setLayer('ParamEyeRSmile', LAYER.pet, 0.9 * this._petIntensity, 200);
+    this._setLayer('ParamEyeLOpen', LAYER.pet, 1.0 - 0.65 * this._petIntensity, 220);
+    this._setLayer('ParamEyeROpen', LAYER.pet, 1.0 - 0.65 * this._petIntensity, 220);
+    this._setLayer('ParamBrowLY', LAYER.pet, 0.25 * this._petIntensity, 220);
+    this._setLayer('ParamBrowRY', LAYER.pet, 0.25 * this._petIntensity, 220);
+
+    // 기쁨 표정 (발화 중이 아닐 때만 입)
+    if (!this.isSpeaking && this.lipVolume <= 0.008) {
+      this._setLayer('ParamMouthOpenY', LAYER.pet, 0.12 * this._petIntensity, 200);
     }
   }
 
@@ -499,36 +933,64 @@ export class Live2DStage {
 
   setLipVolume(vol) {
     this.lipVolume = vol;
-    this._applyLipSync();
   }
 
   setSpeaking(speaking) {
+    const wasSpeaking = this.isSpeaking;
     this.isSpeaking = Boolean(speaking);
-    if (!this.isSpeaking && this.lipVolume < 0.01) {
-      const base = this.persistParams?.ParamMouthOpenY ?? 0.04;
-      this._setMouthOpen(base);
+    if (this.isSpeaking) {
+      clearTimeout(this._emotionDecayTimer);
+    } else if (wasSpeaking) {
+      // 발화 종료 시 1.2초 후 편안한 기본 표정(neutral)으로 자동 감쇠 복귀
+      this._scheduleEmotionDecay(1200);
     }
+  }
+
+  _scheduleEmotionDecay(delayMs = 3500) {
+    clearTimeout(this._emotionDecayTimer);
+    if (this._emotionTag === 'neutral') return;
+    this._emotionDecayTimer = setTimeout(() => {
+      if (this.isSpeaking) return;
+      this.setEmotionSoft('neutral');
+    }, delayMs);
   }
 
   setEmotion(tag) {
     if (!this.model) return;
-    this.persistParams = { ...applyEmotion(this.model, tag || 'smile', this.modelId) };
-    this._applyModelParams();
+    const t = tag || 'smile';
+    this._reactionPrevEmotion = this._emotionTag;
+    this._emotionTag = t;
+    this.persistParams = { ...softEmotion(this.model, t, this.modelId) };
+    this._applyEmotionClaims(this.persistParams);
     this._lastInteraction = Date.now();
-    this.playSituation(tag);
+    // 발화 중이 아닐 때 단독 감정은 3.5초 후 자동으로 neutral 복귀
+    if (!this.isSpeaking && t !== 'neutral') {
+      this._scheduleEmotionDecay(3500);
+    }
+    // 상황별 반응 모션 우선, 없으면 감정 단독 모션 실행
+    if (!this.playSituation(t)) {
+      this._clearReaction();
+      playMotion(this.model, t, this.modelId);
+    }
   }
 
   setEmotionSoft(tag) {
     if (!this.model) return;
-    this.persistParams = { ...softEmotion(this.model, tag || 'smile', this.modelId) };
-    this._applyModelParams();
+    const t = tag || 'smile';
+    this._emotionTag = t;
+    this.persistParams = { ...softEmotion(this.model, t, this.modelId) };
+    this._applyEmotionClaims(this.persistParams);
     this._lastInteraction = Date.now();
+    if (!this.isSpeaking && t !== 'neutral') {
+      this._scheduleEmotionDecay(3500);
+    }
   }
 
   tap() {
     if (!this.model) return;
-    playTapMotion(this.model);
     this._lastInteraction = Date.now();
+    this._playReaction('poke');
+    playTapMotion(this.model, this.modelId);
   }
 
   // ========== 위치/크기 ==========
@@ -564,8 +1026,7 @@ export class Live2DStage {
   }
 
   resetPosition() {
-    this.offsetX = 0; this.offsetY = 0; this.zoom = 1;
-    this._saveOffset(); this._saveZoom(); this._notifyZoom(); this._fit();
+    this.setViewMode(this.viewMode || 'bust', { animated: true, save: true });
   }
 
   setZoom(z, { save = true } = {}) {
@@ -581,15 +1042,117 @@ export class Live2DStage {
   getZoom() { return this.zoom; }
   _notifyZoom() { try { this.onZoomChange?.(this.zoom); } catch {} }
 
+  getViewMode() {
+    return this.viewMode || 'bust';
+  }
+
+  setViewMode(mode, { animated = true, save = true } = {}) {
+    const nextMode = mode === 'full' ? 'full' : 'bust';
+    this.viewMode = nextMode;
+    if (save) {
+      try { localStorage.setItem('miku_avatar_view_mode', nextMode); } catch {}
+    }
+    const preset = getViewPreset(this.modelId, nextMode);
+    const targetZoom = preset.zoom;
+    const targetOffsetX = 0;
+    const targetOffsetY = 0; // _fit에서 모드별 최적 Y 위치를 자동 산출하므로 기본 오프셋은 0
+    const targetWeight = nextMode === 'bust' ? 1 : 0;
+
+    if (!animated || !this.model) {
+      this._bustWeight = targetWeight;
+      this.zoom = targetZoom;
+      this.offsetX = targetOffsetX;
+      this.offsetY = targetOffsetY;
+      this._saveZoom();
+      this._saveOffset();
+      this._notifyZoom();
+      this._fit();
+      this.onViewModeChange?.(this.viewMode);
+      return;
+    }
+
+    if (this._camAnim) cancelAnimationFrame(this._camAnim);
+    const startZoom = this.zoom;
+    const startX = this.offsetX;
+    const startY = this.offsetY;
+    const startWeight = typeof this._bustWeight === 'number' ? this._bustWeight : (startZoom > 2.0 ? 1 : 0);
+    const startTime = performance.now();
+    const duration = 400; // ms
+
+    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+
+    const step = (now) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(1, elapsed / duration);
+      const ease = easeOutCubic(progress);
+
+      this.zoom = startZoom + (targetZoom - startZoom) * ease;
+      this.offsetX = startX + (targetOffsetX - startX) * ease;
+      this.offsetY = startY + (targetOffsetY - startY) * ease;
+      this._bustWeight = startWeight + (targetWeight - startWeight) * ease;
+      this._fit();
+      this._notifyZoom();
+
+      if (progress < 1) {
+        this._camAnim = requestAnimationFrame(step);
+      } else {
+        this._camAnim = null;
+        this._bustWeight = targetWeight;
+        this._saveZoom();
+        this._saveOffset();
+        this.onViewModeChange?.(this.viewMode);
+      }
+    };
+    this._camAnim = requestAnimationFrame(step);
+  }
+
+  toggleViewMode() {
+    const next = this.viewMode === 'bust' ? 'full' : 'bust';
+    this.setViewMode(next, { animated: true, save: true });
+    return next;
+  }
+
+  _getHeadDistance() {
+    const preset = getViewPreset(this.modelId, 'bust');
+    return (preset.headDistRatio || 0.48) * this._baseH;
+  }
+
   _fit() {
     if (!this.app || !this.model) return;
+    const parent = this.canvas.parentElement;
+    if (parent) {
+      const pw = Math.round(parent.clientWidth);
+      const ph = Math.round(parent.clientHeight);
+      if (pw >= 10 && ph >= 10 && (this.app.renderer.width !== pw || this.app.renderer.height !== ph)) {
+        this.app.renderer.resize(pw, ph);
+      }
+    }
     const w = this.app.renderer.width;
     const h = this.app.renderer.height;
     if (w === 0 || h === 0) return;
-    const scale = Math.min(w / this._baseW, h / this._baseH) * 0.92 * this.zoom;
+
+    const bustW = typeof this._bustWeight === 'number'
+      ? this._bustWeight
+      : ((this.viewMode || 'bust') === 'bust' ? 1 : 0);
+
+    // 상반신(bust)과 전신(full)의 기준 폭 보간:
+    // 가로 폭(w)을 넓혀도 인물이 비정상적으로 거대해지지 않도록 상반신 기준 폭을 최대 390px(또는 h * 0.46)로 제한
+    const maxBustW = Math.max(280, Math.min(390, h * 0.46));
+    const effectiveW = lerp(w, Math.min(w, maxBustW), bustW);
+    const baseScale = Math.min(effectiveW / this._baseW, h / this._baseH) * 0.92;
+    const scale = baseScale * this.zoom;
     this.model.scale.set(scale);
+
+    // Y 위치 보간:
+    // - 전신: 화면 중앙(h / 2)
+    // - 상반신: 머리 상단이 상단 배지 바로 아래(y ≈ 56px)에 머물도록 idealCenterY 산출
+    const headDist = this._getHeadDistance();
+    const bustCenterY = 56 + (headDist * scale);
+    const fullCenterY = h / 2;
+    const centerY = lerp(fullCenterY, bustCenterY, bustW);
+
     this.model.x = w / 2 + this.offsetX;
-    this.model.y = h / 2 + this.offsetY;
+    this.model.y = centerY + this.offsetY;
   }
 
   // ========== 인터랙션 ==========
@@ -612,15 +1175,25 @@ export class Live2DStage {
     canvas.style.cursor = 'grab';
     canvas.style.touchAction = 'none';
 
-    // 커서 위치 추적 (항상)
-    canvas.addEventListener('pointermove', (e) => {
+    // 전역(Window) 커서 위치 추적: 화면 어디로 마우스를 옮겨도 시선과 고개가 부드럽게 추적
+    const onGlobalMove = (e) => {
+      if (this._cursorScreenX !== e.clientX || this._cursorScreenY !== e.clientY) {
+        this._cursorScreenX = e.clientX;
+        this._cursorScreenY = e.clientY;
+        this._lastMouseMove = Date.now();
+      }
       const p = this._toLocal(e);
       this._cursorX = p.x;
       this._cursorY = p.y;
-      this._cursorOnCanvas = true;
+      this._cursorInWindow = true;
+      this._lastInteraction = Date.now();
+    };
+    window.addEventListener('pointermove', onGlobalMove, { passive: true });
+    document.addEventListener('pointerleave', () => {
+      this._cursorInWindow = false;
     });
-    canvas.addEventListener('pointerleave', () => {
-      this._cursorOnCanvas = false;
+    window.addEventListener('blur', () => {
+      this._cursorInWindow = false;
     });
 
     canvas.addEventListener('pointerdown', (e) => {
@@ -656,12 +1229,7 @@ export class Live2DStage {
       if (pr.onModel) {
         this._onPet(dx, dy, p);
       } else {
-        const w = this.app.renderer.width;
-        const h = this.app.renderer.height;
-        this.offsetX = Math.max(-w * 0.6, Math.min(w * 0.6, this.offsetX + dx));
-        this.offsetY = Math.max(-h * 0.6, Math.min(h * 0.6, this.offsetY + dy));
-        this.model.x = w / 2 + this.offsetX;
-        this.model.y = h / 2 + this.offsetY;
+        this._moveBy(dx, dy);
         pr.movedModel = true;
       }
       this._lastInteraction = Date.now();
@@ -674,7 +1242,8 @@ export class Live2DStage {
       if (!pr || (e.pointerId !== undefined && pr.id !== e.pointerId)) return;
       this._press = null;
       if (pr.movedModel) this._saveOffset();
-      if (!pr.dragging && !this._holdFired) this.tap();
+      // 더블클릭과 겹치지 않게 단일 클릭 반응은 잠시 유예한다.
+      if (!pr.dragging && !this._holdFired) this._scheduleTap();
       this._lastInteraction = Date.now();
     };
     canvas.addEventListener('pointerup', up);
@@ -687,6 +1256,7 @@ export class Live2DStage {
 
     canvas.addEventListener('dblclick', (e) => {
       if (!this.model) return;
+      clearTimeout(this._tapTimer);
       const p = this._toLocal(e);
       this.celebrateAt(p.x, p.y);
     });
@@ -704,15 +1274,42 @@ export class Live2DStage {
         rafId = null;
         const parent = this.canvas.parentElement;
         if (!parent) return;
-        const pw = parent.clientWidth;
-        const ph = parent.clientHeight;
+        const pw = Math.round(parent.clientWidth);
+        const ph = Math.round(parent.clientHeight);
         if (pw < 10 || ph < 10) return;
-        this.app.renderer.resize(pw, ph);
-        this._fit();
+        if (this.app?.renderer) {
+          this.app.renderer.resize(pw, ph);
+          this._fit();
+        }
       });
     };
     window.addEventListener('resize', onResize);
-    setTimeout(() => onResize(), 100);
+
+    // DOM 컨테이너 크기 변경 감지 (로그인 창 전환, 사이드바 토글, 패널 열림/닫힘 대응)
+    if (typeof ResizeObserver !== 'undefined' && this.canvas.parentElement) {
+      this._resizeObserver = new ResizeObserver(() => {
+        onResize();
+      });
+      this._resizeObserver.observe(this.canvas.parentElement);
+    }
+
+    setTimeout(() => onResize(), 50);
+    setTimeout(() => onResize(), 200);
+    setTimeout(() => onResize(), 500);
+  }
+
+  _scheduleTap() {
+    clearTimeout(this._tapTimer);
+    this._tapTimer = setTimeout(() => { this._tapTimer = null; this.tap(); }, DBLCLICK_WINDOW_MS);
+  }
+
+  _moveBy(dx, dy) {
+    const w = this.app.renderer.width;
+    const h = this.app.renderer.height;
+    this.offsetX = Math.max(-w * 0.6, Math.min(w * 0.6, this.offsetX + dx));
+    this.offsetY = Math.max(-h * 0.6, Math.min(h * 0.6, this.offsetY + dy));
+    this.model.x = w / 2 + this.offsetX;
+    this.model.y = h / 2 + this.offsetY;
   }
 
   // ========== 인터랙션 핸들러 ==========
@@ -748,6 +1345,35 @@ export class Live2DStage {
     };
   }
 
+  // 테스트/진단용: 지금 어떤 레이어가 어떤 파라미터를 잡고 있는지 반환한다.
+  getActionInfo() {
+    const state = this.model?.internalModel?.motionManager?.state;
+    const layerNames = { [LAYER.idle]: 'idle', [LAYER.emotion]: 'emotion', [LAYER.pet]: 'pet', [LAYER.blink]: 'blink', [LAYER.action]: 'action' };
+    const layers = {};
+    for (const [id, claims] of Object.entries(this._claims)) {
+      for (const prio of claims.keys()) {
+        const name = layerNames[prio];
+        if (!name) continue;
+        (layers[name] ||= []).push(id);
+      }
+    }
+    return {
+      model: this.modelId,
+      emotion: this._emotionTag,
+      reaction: this._reaction
+        ? { name: this._reaction.name, msLeft: Math.max(0, this._reaction.endsAt - Date.now()) }
+        : null,
+      motion: state?.currentGroup ? { group: state.currentGroup, index: state.currentIndex, priority: state.currentPriority } : null,
+      layers,
+      fading: Object.keys(this._pose).filter((id) => !this._claims[id]),
+      speaking: Boolean(this.isSpeaking),
+      lipVolume: +this.lipVolume.toFixed(3),
+      mouth: +(this._pose.ParamMouthOpenY ?? 0).toFixed(2),
+      petIntensity: +this._petIntensity.toFixed(2),
+      trackIntensity: +this._trackIntensity.toFixed(2),
+    };
+  }
+
   centerPoint() {
     if (!this.app) return { x: 200, y: 200 };
     return { x: this.app.renderer.width / 2 + this.offsetX, y: this.app.renderer.height / 2 + this.offsetY };
@@ -755,12 +1381,7 @@ export class Live2DStage {
 
   nudge(dx, dy) {
     if (!this.model) return null;
-    const w = this.app.renderer.width;
-    const h = this.app.renderer.height;
-    this.offsetX = Math.max(-w * 0.6, Math.min(w * 0.6, this.offsetX + dx));
-    this.offsetY = Math.max(-h * 0.6, Math.min(h * 0.6, this.offsetY + dy));
-    this.model.x = w / 2 + this.offsetX;
-    this.model.y = h / 2 + this.offsetY;
+    this._moveBy(dx, dy);
     this._saveOffset();
     return { offsetX: Math.round(this.offsetX), offsetY: Math.round(this.offsetY) };
   }
@@ -769,7 +1390,7 @@ export class Live2DStage {
   petStroke(x, y, cursorDx = 0) {
     if (!this.model) return 0;
     this._petStrokes += 1;
-    this._petIntensity = Math.min(1, this._petIntensity + 0.25);
+    this._petIntensity = Math.min(1, this._petIntensity + 0.28);
     this._petCursorDx = Math.max(-1, Math.min(1, cursorDx / 20));
 
     // 점진적 표정 변화 (쓰다듬을수록 강해짐)
@@ -781,10 +1402,10 @@ export class Live2DStage {
       this.setEmotionSoft('cheer');
     }
 
-    // 3스트로크마다 모션
-    if (this._petStrokes % 3 === 0) playPetMotion(this.model, this.modelId);
-    // 하트
-    if (this._petStrokes % HEART_EVERY_STROKES === 0) this._spawnHearts(x, y, 1);
+    // 쓰다듬기 시작 시 부드러운 다정한 모션 1회 전환 (스트로크 반복 난타 방지)
+    if (this._petStrokes === 1) {
+      playPetMotion(this.model, this.modelId);
+    }
     if (this._petStrokes > 1000) this._petStrokes = 0;
     this._lastInteraction = Date.now();
     return this._petStrokes;
@@ -800,31 +1421,21 @@ export class Live2DStage {
 
   holdAt(x, y) {
     if (!this.model) return false;
-    this.setEmotion('love');
     this._petIntensity = 0.8;
     this._petCursorDx = 0;
-    this._spawnHearts(x, y, 3);
-    // 홀딩 시 강한 반응
-    this._setParamSmooth('ParamAngleZ', -5, PRIO.hold, 0.12);
-    this._setParamSmooth('ParamBodyAngleY', -3, PRIO.hold, 0.1);
+    this._playReaction('hold');
     this._lastInteraction = Date.now();
     return true;
   }
 
   celebrateAt(x, y) {
     if (!this.model) return false;
-    this.setEmotion('cheer');
+    this._emotionTag = 'cheer';
+    this.persistParams = { ...softEmotion(this.model, 'cheer', this.modelId) };
+    this._applyEmotionClaims(this.persistParams);
+    this._playReaction('celebrate');
     playCelebrateMotion(this.model, this.modelId);
-    this._spawnHearts(x, y, 5);
-    // 축하 바운스
-    this._setParamSmooth('ParamBodyAngleY', -6, PRIO.motion, 0.15);
-    setTimeout(() => this._setParamSmooth('ParamBodyAngleY', 0, PRIO.motion - 1, 0.08), 300);
     this._lastInteraction = Date.now();
-    return true;
-  }
-
-  heartAt(x, y, n = 1) {
-    this._spawnHearts(x, y, n);
     return true;
   }
 
@@ -846,710 +1457,61 @@ export class Live2DStage {
     try { return await this.model.expression(id); } catch { return false; }
   }
 
-  // ========== 상황별 모션 (파라미터 기반) ==========
+  // ========== 상황별 모션 (레이어 기반) ==========
 
-  // 설명/강의 중: 고개 끄덕임 + 손 제스처
-  playExplain() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    // 고개 끄덕임 (3회)
-    let delay = 0;
-    for (let i = 0; i < 3; i++) {
-      setTimeout(() => {
-        this._setParamSmooth('ParamAngleY', -8, PRIO.script, 0.18);
-        setTimeout(() => this._setParamSmooth('ParamAngleY', 3, PRIO.script, 0.12), 180);
-        setTimeout(() => this._setParamSmooth('ParamAngleY', 0, PRIO.script - 1, 0.1), 360);
-      }, delay);
-      delay += 600;
+  _playReaction(name) {
+    const def = REACTIONS[name];
+    if (!def || !this.model) return false;
+    this._beginReaction(name, def.ms, def.endEmotion);
+    if (def.emotion) this.setEmotionSoft(def.emotion);
+    const motionPlayed = playMotion(this.model, name, this.modelId);
+    // 모션 파일이 실제로 실행된 경우, 모션 커브가 고개/몸통을 직접 구동하므로
+    // 인공적인 절차적 트랙(osc 등)으로 모션 각도를 덮어씌우지 않는다.
+    // 모션 파일이 없는 모델(센코, 은랑)이거나 모션 매핑이 없는 경우에만 tracks로 보조한다.
+    if (!motionPlayed) {
+      for (const [id, frames] of Object.entries(def.tracks)) {
+        for (const [at, value, tau] of frames) this._actAt(id, value, tau, at);
+      }
+      try {
+        const mm = this.model.internalModel?.motionManager;
+        if (mm && mm.state?.currentPriority > 1) {
+          mm.startRandomMotion(mm.groups.idle, 1);
+        }
+      } catch {}
     }
-    // 몸 기울이기 (설명 포즈)
-    this._setParamSmooth('ParamBodyAngleX', -4, PRIO.script, 0.06);
-    setTimeout(() => this._setParamSmooth('ParamBodyAngleX', 0, PRIO.script - 1, 0.04), 2000);
-    this.setEmotionSoft('think');
+    return true;
   }
 
-  // 놀람: 눈 커지고 고개 뒤로
-  playSurprise() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('cheer');
-    this._setParamSmooth('ParamEyeLOpen', 1.2, PRIO.script, 0.3);
-    this._setParamSmooth('ParamEyeROpen', 1.2, PRIO.script, 0.3);
-    this._setParamSmooth('ParamAngleY', -12, PRIO.script, 0.25);
-    this._setParamSmooth('ParamMouthOpenY', 0.3, PRIO.script, 0.2);
-    this._setParamSmooth('ParamBrowLY', 0.6, PRIO.script, 0.2);
-    this._setParamSmooth('ParamBrowRY', 0.6, PRIO.script, 0.2);
-    // 원위리
-    setTimeout(() => {
-      this._decayParam('ParamEyeLOpen', 0.08);
-      this._decayParam('ParamEyeROpen', 0.08);
-      this._decayParam('ParamAngleY', 0.06);
-      this._decayParam('ParamMouthOpenY', 0.06);
-      this._decayParam('ParamBrowLY', 0.06);
-      this._decayParam('ParamBrowRY', 0.06);
-    }, 1200);
-  }
-
-  // 생각/고민: 고개 기울임 + 눈 좁힘
-  playThink() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('think');
-    this._setParamSmooth('ParamAngleZ', -8, PRIO.script, 0.08);
-    this._setParamSmooth('ParamAngleX', 5, PRIO.script, 0.06);
-    this._setParamSmooth('ParamEyeLOpen', 0.7, PRIO.script, 0.08);
-    this._setParamSmooth('ParamEyeROpen', 0.7, PRIO.script, 0.08);
-    this._setParamSmooth('ParamBrowLY', -0.3, PRIO.script, 0.08);
-    this._setParamSmooth('ParamBrowRY', -0.3, PRIO.script, 0.08);
-    this._setParamSmooth('ParamMouthForm', -0.2, PRIO.script, 0.06);
-    // 3초 후 원위리
-    setTimeout(() => {
-      this._decayParam('ParamAngleZ', 0.05);
-      this._decayParam('ParamAngleX', 0.05);
-      this._decayParam('ParamEyeLOpen', 0.05);
-      this._decayParam('ParamEyeROpen', 0.05);
-      this._decayParam('ParamBrowLY', 0.05);
-      this._decayParam('ParamBrowRY', 0.05);
-      this._decayParam('ParamMouthForm', 0.05);
-    }, 3000);
-  }
-
-  // 기쁨/환희: 점프 + 미소
-  playJoy() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotion('cheer');
-    // 바운스
-    const bounce = () => {
-      this._setParamSmooth('ParamBodyAngleY', -10, PRIO.script, 0.25);
-      setTimeout(() => this._setParamSmooth('ParamBodyAngleY', 4, PRIO.script, 0.15), 200);
-      setTimeout(() => this._setParamSmooth('ParamBodyAngleY', 0, PRIO.script - 1, 0.1), 400);
-    };
-    bounce();
-    setTimeout(bounce, 700);
-    setTimeout(bounce, 1400);
-    // 팔 벌리기
-    this._setParamSmooth('ParamBodyAngleX', -6, PRIO.script, 0.12);
-    setTimeout(() => this._setParamSmooth('ParamBodyAngleX', 6, PRIO.script, 0.12), 350);
-    setTimeout(() => this._setParamSmooth('ParamBodyAngleX', 0, PRIO.script - 1, 0.08), 700);
-    this._spawnHearts(this.centerPoint().x, this.centerPoint().y - 60, 4);
-  }
-
-  // 슬픔: 고개 숙임 + 눈 감기
-  playSad() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('sad');
-    this._setParamSmooth('ParamAngleY', 10, PRIO.script, 0.06);
-    this._setParamSmooth('ParamAngleZ', 5, PRIO.script, 0.05);
-    this._setParamSmooth('ParamEyeLOpen', 0.4, PRIO.script, 0.06);
-    this._setParamSmooth('ParamEyeROpen', 0.4, PRIO.script, 0.06);
-    this._setParamSmooth('ParamBrowLY', -0.5, PRIO.script, 0.06);
-    this._setParamSmooth('ParamBrowRY', -0.5, PRIO.script, 0.06);
-    this._setParamSmooth('ParamBodyAngleY', 5, PRIO.script, 0.04);
-    // 4초 후 원위리
-    setTimeout(() => {
-      this._decayParam('ParamAngleY', 0.04);
-      this._decayParam('ParamAngleZ', 0.04);
-      this._decayParam('ParamEyeLOpen', 0.04);
-      this._decayParam('ParamEyeROpen', 0.04);
-      this._decayParam('ParamBrowLY', 0.04);
-      this._decayParam('ParamBrowRY', 0.04);
-      this._decayParam('ParamBodyAngleY', 0.03);
-    }, 4000);
-  }
-
-  // 화남: 주먹潖 + 고개 떨림
-  playAngry() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('think'); // 눈썹 찡그림
-    this._setParamSmooth('ParamBrowLY', -0.7, PRIO.script, 0.2);
-    this._setParamSmooth('ParamBrowRY', -0.7, PRIO.script, 0.2);
-    this._setParamSmooth('ParamMouthForm', -0.4, PRIO.script, 0.15);
-    this._setParamSmooth('ParamAngleZ', -4, PRIO.script, 0.15);
-    // 떨림
-    let shakeCount = 0;
-    const shake = () => {
-      if (shakeCount >= 8) {
-        this._decayParam('ParamAngleZ', 0.08);
-        this._decayParam('ParamBrowLY', 0.05);
-        this._decayParam('ParamBrowRY', 0.05);
-        this._decayParam('ParamMouthForm', 0.05);
-        return;
-      }
-      this._setParam('ParamAngleZ', (shakeCount % 2 === 0 ? -6 : 2));
-      shakeCount++;
-      setTimeout(shake, 100);
-    };
-    shake();
-  }
-
-  // 졸음/수면: 고개 떨어짐 + 눈 감김
-  playSleepy() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('neutral');
-    this._setParamSmooth('ParamAngleY', 15, PRIO.script, 0.03);
-    this._setParamSmooth('ParamAngleZ', 8, PRIO.script, 0.03);
-    this._setParamSmooth('ParamEyeLOpen', 0.15, PRIO.script, 0.04);
-    this._setParamSmooth('ParamEyeROpen', 0.15, PRIO.script, 0.04);
-    this._setParamSmooth('ParamBodyAngleY', 8, PRIO.script, 0.03);
-    this._setParamSmooth('ParamMouthOpenY', 0.08, PRIO.script, 0.03);
-    // 코골이 효과 (ParamMouthOpenY 둥글게)
-    this._breathPhase = 0;
-  }
-
-  // 깨어남: 기지개
-  playWakeUp() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    // 빠르게 깨어나기
-    this._decayParam('ParamAngleY', 0.15);
-    this._decayParam('ParamAngleZ', 0.15);
-    this._decayParam('ParamEyeLOpen', 0.2);
-    this._decayParam('ParamEyeROpen', 0.2);
-    this._decayParam('ParamBodyAngleY', 0.12);
-    this._decayParam('ParamMouthOpenY', 0.1);
-    // 기지개 (팔 stretche)
-    setTimeout(() => {
-      this._setParamSmooth('ParamBodyAngleY', -8, PRIO.script, 0.1);
-      this._setParamSmooth('ParamAngleY', -5, PRIO.script, 0.12);
-      this._setParamSmooth('ParamEyeLOpen', 1.1, PRIO.script, 0.15);
-      this._setParamSmooth('ParamEyeROpen', 1.1, PRIO.script, 0.15);
-    }, 500);
-    setTimeout(() => {
-      this._decayParam('ParamBodyAngleY', 0.08);
-      this._decayParam('ParamAngleY', 0.08);
-      this._decayParam('ParamEyeLOpen', 0.08);
-      this._decayParam('ParamEyeROpen', 0.08);
-      this.setEmotionSoft('smile');
-    }, 1500);
-  }
-
-  // 인사: 고개 숙임
-  playGreet() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('smile');
-    this._setParamSmooth('ParamAngleY', 12, PRIO.script, 0.15);
-    this._setParamSmooth('ParamBodyAngleY', 6, PRIO.script, 0.1);
-    setTimeout(() => {
-      this._decayParam('ParamAngleY', 0.08);
-      this._decayParam('ParamBodyAngleY', 0.06);
-    }, 1000);
-  }
-
-  // 흔들기(거절): 고개 좌우
-  playShake() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('think');
-    let count = 0;
-    const swing = () => {
-      if (count >= 6) {
-        this._decayParam('ParamAngleX', 0.1);
-        return;
-      }
-      this._setParam('ParamAngleX', count % 2 === 0 ? -15 : 15);
-      count++;
-      setTimeout(swing, 150);
-    };
-    swing();
-  }
-
-  // 맞장구(동의): 고개 끄덕임
-  playNod() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('smile');
-    let count = 0;
-    const nod = () => {
-      if (count >= 4) {
-        this._decayParam('ParamAngleY', 0.1);
-        return;
-      }
-      this._setParam('ParamAngleY', count % 2 === 0 ? -8 : 3);
-      count++;
-      setTimeout(nod, 200);
-    };
-    nod();
-  }
-
-  // 손 흔들기 인사
-  playWave() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('cheer');
-    this._setParamSmooth('ParamBodyAngleX', -8, PRIO.script, 0.12);
-    let count = 0;
-    const wave = () => {
-      if (count >= 8) {
-        this._decayParam('ParamBodyAngleX', 0.08);
-        return;
-      }
-      this._setParam('ParamAngleZ', count % 2 === 0 ? -6 : 6);
-      count++;
-      setTimeout(wave, 180);
-    };
-    wave();
-  }
-
-  // 박수
-  playClap() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('cheer');
-    let count = 0;
-    const clap = () => {
-      if (count >= 6) {
-        this._decayParam('ParamBodyAngleX', 0.08);
-        return;
-      }
-      this._setParam('ParamBodyAngleX', count % 2 === 0 ? -5 : 5);
-      this._setParam('ParamMouthOpenY', 0.2);
-      count++;
-      setTimeout(clap, 250);
-    };
-    clap();
-  }
-
-  // 춤: 리듬 있는 동작
-  playDance() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotion('cheer');
-    const beats = [
-      { ax: -10, ay: -5, az: -8, body: -6, t: 0 },
-      { ax: 8, ay: 3, az: 6, body: 5, t: 300 },
-      { ax: -6, ay: -8, az: -4, body: -4, t: 600 },
-      { ax: 10, ay: 5, az: 8, body: 6, t: 900 },
-      { ax: -8, ay: 3, az: -6, body: -5, t: 1200 },
-      { ax: 6, ay: -5, az: 4, body: 4, t: 1500 },
-      { ax: -10, ay: -3, az: -8, body: -6, t: 1800 },
-      { ax: 8, ay: 8, az: 6, body: 5, t: 2100 },
-    ];
-    for (const b of beats) {
-      setTimeout(() => {
-        this._setParamSmooth('ParamAngleX', b.ax, PRIO.script, 0.2);
-        this._setParamSmooth('ParamAngleY', b.ay, PRIO.script, 0.18);
-        this._setParamSmooth('ParamAngleZ', b.az, PRIO.script, 0.16);
-        this._setParamSmooth('ParamBodyAngleX', b.body, PRIO.script, 0.14);
-        this._setParamSmooth('ParamMouthOpenY', 0.15, PRIO.script, 0.15);
-      }, b.t);
-    }
-    setTimeout(() => {
-      ['ParamAngleX', 'ParamAngleY', 'ParamAngleZ', 'ParamBodyAngleX', 'ParamMouthOpenY']
-        .forEach((p) => this._decayParam(p, 0.06));
-    }, 2500);
-  }
-
-  // 열공/집중: 진지한 눈매, 앞으로 살짝 기울여 집중
-  playFocus() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('focus');
-    this._setParamSmooth('ParamAngleY', 5, PRIO.script, 0.1);
-    this._setParamSmooth('ParamBodyAngleY', -5, PRIO.script, 0.08);
-    this._setParamSmooth('ParamEyeLOpen', 0.88, PRIO.script, 0.12);
-    this._setParamSmooth('ParamEyeROpen', 0.88, PRIO.script, 0.12);
-    this._setParamSmooth('ParamBrowLY', -0.25, PRIO.script, 0.1);
-    this._setParamSmooth('ParamBrowRY', -0.25, PRIO.script, 0.1);
-    this._setParamSmooth('ParamMouthForm', 0.1, PRIO.script, 0.08);
-    this._setParamSmooth('ParamMouthOpenY', 0.02, PRIO.script, 0.08);
-    setTimeout(() => {
-      this._decayParam('ParamAngleY', 0.05);
-      this._decayParam('ParamBodyAngleY', 0.05);
-      this._decayParam('ParamEyeLOpen', 0.06);
-      this._decayParam('ParamEyeROpen', 0.06);
-      this._decayParam('ParamBrowLY', 0.05);
-      this._decayParam('ParamBrowRY', 0.05);
-      this._decayParam('ParamMouthForm', 0.05);
-    }, 2500);
-  }
-
-  // 뿌듯/자신감: 가슴 펴고 고개 으쓱, "나한테 맡겨!"
-  playProud() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('proud');
-    this._setParamSmooth('ParamBodyAngleY', -7, PRIO.script, 0.14);
-    this._setParamSmooth('ParamBodyAngleX', 4, PRIO.script, 0.1);
-    this._setParamSmooth('ParamAngleY', -8, PRIO.script, 0.12);
-    this._setParamSmooth('ParamAngleZ', -7, PRIO.script, 0.12);
-    this._setParamSmooth('ParamAngleX', 6, PRIO.script, 0.1);
-    this._setParamSmooth('ParamBrowLY', 0.35, PRIO.script, 0.12);
-    this._setParamSmooth('ParamBrowRY', 0.35, PRIO.script, 0.12);
-    this._setParamSmooth('ParamMouthForm', 0.6, PRIO.script, 0.15);
-    this._setParamSmooth('ParamMouthOpenY', 0.12, PRIO.script, 0.1);
-    this._spawnHearts(this.centerPoint().x + 30, this.centerPoint().y - 50, 1);
-    setTimeout(() => {
-      this._decayParam('ParamBodyAngleY', 0.06);
-      this._decayParam('ParamBodyAngleX', 0.05);
-      this._decayParam('ParamAngleY', 0.06);
-      this._decayParam('ParamAngleZ', 0.05);
-      this._decayParam('ParamAngleX', 0.05);
-      this._decayParam('ParamBrowLY', 0.05);
-      this._decayParam('ParamBrowRY', 0.05);
-      this._decayParam('ParamMouthForm', 0.05);
-    }, 2200);
-  }
-
-  // 응원/파이팅: 힘찬 2단 도약 바운스 + 미소 + 하트
-  playFighting() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotion('cheer');
-    // 1단 바운스
-    this._setParamSmooth('ParamBodyAngleY', -8, PRIO.script, 0.25);
-    this._setParamSmooth('ParamEyeLOpen', 1.15, PRIO.script, 0.2);
-    this._setParamSmooth('ParamEyeROpen', 1.15, PRIO.script, 0.2);
-    this._setParamSmooth('ParamCheek', 0.35, PRIO.script, 0.15);
-    setTimeout(() => {
-      this._setParamSmooth('ParamBodyAngleY', 2, PRIO.script, 0.15);
-    }, 180);
-    // 2단 더 큰 바운스
-    setTimeout(() => {
-      this._setParamSmooth('ParamBodyAngleY', -14, PRIO.script, 0.28);
-      this._setParamSmooth('ParamMouthOpenY', 0.28, PRIO.script, 0.2);
-      this._setParamSmooth('ParamMouthForm', 0.5, PRIO.script, 0.2);
-      this._setParamSmooth('ParamAngleY', -6, PRIO.script, 0.15);
-      this._spawnHearts(this.centerPoint().x, this.centerPoint().y - 60, 3);
-    }, 380);
-    setTimeout(() => {
-      this._setParamSmooth('ParamBodyAngleY', 4, PRIO.script, 0.12);
-    }, 620);
-    setTimeout(() => {
-      this._decayParam('ParamBodyAngleY', 0.08);
-      this._decayParam('ParamAngleY', 0.06);
-      this._decayParam('ParamEyeLOpen', 0.06);
-      this._decayParam('ParamEyeROpen', 0.06);
-      this._decayParam('ParamCheek', 0.05);
-      this._decayParam('ParamMouthOpenY', 0.08);
-      this._decayParam('ParamMouthForm', 0.06);
-    }, 1200);
-  }
-
-  // 부끄/수줍음: 볼 붉히며 시선 피하기
-  playShy() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('shy');
-    this._setParamSmooth('ParamCheek', 0.65, PRIO.script, 0.15);
-    this._setParamSmooth('ParamAngleX', 18, PRIO.script, 0.08);
-    this._setParamSmooth('ParamAngleY', 10, PRIO.script, 0.08);
-    this._setParamSmooth('ParamAngleZ', -6, PRIO.script, 0.08);
-    this._setParamSmooth('ParamBodyAngleX', 5, PRIO.script, 0.06);
-    this._setParamSmooth('ParamEyeLOpen', 0.55, PRIO.script, 0.08);
-    this._setParamSmooth('ParamEyeROpen', 0.55, PRIO.script, 0.08);
-    this._setParamSmooth('ParamMouthForm', 0.25, PRIO.script, 0.08);
-    this._setParamSmooth('ParamMouthOpenY', 0.06, PRIO.script, 0.08);
-    this._spawnHearts(this.centerPoint().x + 25, this.centerPoint().y - 20, 2);
-    setTimeout(() => {
-      this._decayParam('ParamAngleX', 0.04);
-      this._decayParam('ParamAngleY', 0.04);
-      this._decayParam('ParamAngleZ', 0.04);
-      this._decayParam('ParamBodyAngleX', 0.04);
-      this._decayParam('ParamEyeLOpen', 0.05);
-      this._decayParam('ParamEyeROpen', 0.05);
-      this._decayParam('ParamCheek', 0.03);
-    }, 2800);
-  }
-
-  // 당황/멘붕: 눈 커지고 좌우로 안절부절 지그재그 진동
-  playPanic() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('panic');
-    this._setParamSmooth('ParamEyeLOpen', 1.3, PRIO.script, 0.3);
-    this._setParamSmooth('ParamEyeROpen', 1.3, PRIO.script, 0.3);
-    this._setParamSmooth('ParamBrowLY', 0.7, PRIO.script, 0.25);
-    this._setParamSmooth('ParamBrowRY', 0.7, PRIO.script, 0.25);
-    this._setParamSmooth('ParamMouthOpenY', 0.32, PRIO.script, 0.2);
-    this._setParamSmooth('ParamMouthForm', -0.3, PRIO.script, 0.15);
-
-    let shake = 0;
-    const interval = 80;
-    const timer = setInterval(() => {
-      shake++;
-      if (shake > 10) {
-        clearInterval(timer);
-        this._decayParam('ParamAngleX', 0.08);
-        this._decayParam('ParamAngleZ', 0.08);
-        this._decayParam('ParamEyeLOpen', 0.06);
-        this._decayParam('ParamEyeROpen', 0.06);
-        this._decayParam('ParamBrowLY', 0.06);
-        this._decayParam('ParamBrowRY', 0.06);
-        this._decayParam('ParamMouthOpenY', 0.06);
-        return;
-      }
-      const dir = shake % 2 === 0 ? 1 : -1;
-      this._setParam('ParamAngleX', dir * 14);
-      this._setParam('ParamAngleZ', dir * 8);
-    }, interval);
-  }
-
-  // 갸우뚱/호기심: 고개 크게 갸우뚱 + 동그란 눈
-  playCurious() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('curious');
-    this._setParamSmooth('ParamAngleZ', 15, PRIO.script, 0.12);
-    this._setParamSmooth('ParamAngleX', -9, PRIO.script, 0.1);
-    this._setParamSmooth('ParamAngleY', -3, PRIO.script, 0.08);
-    this._setParamSmooth('ParamEyeLOpen', 1.08, PRIO.script, 0.1);
-    this._setParamSmooth('ParamEyeROpen', 0.95, PRIO.script, 0.1);
-    this._setParamSmooth('ParamBrowLY', 0.25, PRIO.script, 0.1);
-    this._setParamSmooth('ParamBrowRY', -0.15, PRIO.script, 0.1);
-    this._setParamSmooth('ParamMouthOpenY', 0.12, PRIO.script, 0.1);
-    this._setParamSmooth('ParamMouthForm', 0.15, PRIO.script, 0.1);
-    setTimeout(() => {
-      this._decayParam('ParamAngleZ', 0.05);
-      this._decayParam('ParamAngleX', 0.05);
-      this._decayParam('ParamAngleY', 0.05);
-      this._decayParam('ParamEyeLOpen', 0.05);
-      this._decayParam('ParamEyeROpen', 0.05);
-      this._decayParam('ParamBrowLY', 0.05);
-      this._decayParam('ParamBrowRY', 0.05);
-      this._decayParam('ParamMouthOpenY', 0.05);
-    }, 2600);
-  }
-
-  // 꾸벅꾸벅/졸림 참기: 고개 푹 떨어지다 화들짝 깨기
-  playDozeOff() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('dozeoff');
-    // 1단계: 천천히 꾸벅
-    this._setParamSmooth('ParamAngleY', 18, PRIO.script, 0.03);
-    this._setParamSmooth('ParamBodyAngleY', 7, PRIO.script, 0.025);
-    this._setParamSmooth('ParamEyeLOpen', 0.08, PRIO.script, 0.03);
-    this._setParamSmooth('ParamEyeROpen', 0.08, PRIO.script, 0.03);
-    // 2단계: 깜짝 놀라며 번쩍 고개 들기!
-    setTimeout(() => {
-      this._setParamSmooth('ParamAngleY', -12, PRIO.script, 0.35);
-      this._setParamSmooth('ParamBodyAngleY', -4, PRIO.script, 0.25);
-      this._setParamSmooth('ParamEyeLOpen', 1.2, PRIO.script, 0.3);
-      this._setParamSmooth('ParamEyeROpen', 1.2, PRIO.script, 0.3);
-      this._setParamSmooth('ParamBrowLY', 0.4, PRIO.script, 0.25);
-      this._setParamSmooth('ParamBrowRY', 0.4, PRIO.script, 0.25);
-    }, 1300);
-    // 3단계: 겸연쩍은 미소
-    setTimeout(() => {
-      this._setParamSmooth('ParamMouthForm', 0.25, PRIO.script, 0.1);
-      this._setParamSmooth('ParamEyeLOpen', 0.9, PRIO.script, 0.08);
-      this._setParamSmooth('ParamEyeROpen', 0.9, PRIO.script, 0.08);
-      this._decayParam('ParamAngleY', 0.06);
-      this._decayParam('ParamBodyAngleY', 0.05);
-      this._decayParam('ParamBrowLY', 0.05);
-      this._decayParam('ParamBrowRY', 0.05);
-    }, 1800);
-    setTimeout(() => {
-      this._decayParam('ParamMouthForm', 0.05);
-    }, 2800);
-  }
-
-  // 안도/다행/휴~: 한숨 쉬며 어깨 긴장 풀기
-  playRelieved() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('relieved');
-    // 숨 들이쉬기
-    this._setParamSmooth('ParamAngleY', -6, PRIO.script, 0.08);
-    this._setParamSmooth('ParamBodyAngleY', -4, PRIO.script, 0.08);
-    // 내쉬며 긴장 풀기
-    setTimeout(() => {
-      this._setParamSmooth('ParamAngleY', 9, PRIO.script, 0.07);
-      this._setParamSmooth('ParamBodyAngleY', 5, PRIO.script, 0.06);
-      this._setParamSmooth('ParamEyeLOpen', 0.25, PRIO.script, 0.08);
-      this._setParamSmooth('ParamEyeROpen', 0.25, PRIO.script, 0.08);
-      this._setParamSmooth('ParamMouthOpenY', 0.15, PRIO.script, 0.08);
-    }, 500);
-    // 편안한 미소로 복귀
-    setTimeout(() => {
-      this._setParamSmooth('ParamEyeLOpen', 0.85, PRIO.script, 0.08);
-      this._setParamSmooth('ParamEyeROpen', 0.85, PRIO.script, 0.08);
-      this._setParamSmooth('ParamMouthForm', 0.4, PRIO.script, 0.1);
-      this._setParamSmooth('ParamMouthOpenY', 0.04, PRIO.script, 0.08);
-      this._decayParam('ParamAngleY', 0.05);
-      this._decayParam('ParamBodyAngleY', 0.04);
-    }, 1300);
-    setTimeout(() => {
-      this._decayParam('ParamMouthForm', 0.05);
-    }, 2600);
-  }
-
-  // 삐짐/뾰로통: 고개 홱 돌리고 뾰로통한 입
-  playPout() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('pout');
-    this._setParamSmooth('ParamAngleX', -24, PRIO.script, 0.2);
-    this._setParamSmooth('ParamAngleZ', -7, PRIO.script, 0.15);
-    this._setParamSmooth('ParamBodyAngleX', -10, PRIO.script, 0.12);
-    this._setParamSmooth('ParamMouthForm', -0.5, PRIO.script, 0.15);
-    this._setParamSmooth('ParamMouthOpenY', 0.04, PRIO.script, 0.1);
-    this._setParamSmooth('ParamBrowLY', -0.35, PRIO.script, 0.15);
-    this._setParamSmooth('ParamBrowRY', -0.35, PRIO.script, 0.15);
-    this._setParamSmooth('ParamEyeLOpen', 0.65, PRIO.script, 0.1);
-    this._setParamSmooth('ParamEyeROpen', 0.65, PRIO.script, 0.1);
-    this._setParamSmooth('ParamCheek', 0.25, PRIO.script, 0.08);
-    setTimeout(() => {
-      this._decayParam('ParamAngleX', 0.04);
-      this._decayParam('ParamAngleZ', 0.04);
-      this._decayParam('ParamBodyAngleX', 0.03);
-      this._decayParam('ParamMouthForm', 0.04);
-      this._decayParam('ParamBrowLY', 0.04);
-      this._decayParam('ParamBrowRY', 0.04);
-      this._decayParam('ParamEyeLOpen', 0.05);
-      this._decayParam('ParamEyeROpen', 0.05);
-      this._decayParam('ParamCheek', 0.03);
-    }, 3000);
-  }
-
-  // 속닥속닥/비밀: 앞으로 쑥 다가와 귓속말 포즈
-  playWhisper() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('whisper');
-    this._setParamSmooth('ParamBodyAngleY', -9, PRIO.script, 0.1);
-    this._setParamSmooth('ParamAngleY', 6, PRIO.script, 0.1);
-    this._setParamSmooth('ParamAngleZ', -11, PRIO.script, 0.12);
-    this._setParamSmooth('ParamAngleX', 13, PRIO.script, 0.1);
-    this._setParamSmooth('ParamEyeLOpen', 0.85, PRIO.script, 0.1);
-    this._setParamSmooth('ParamEyeROpen', 0.1, PRIO.script, 0.15); // 윙크
-    this._setParamSmooth('ParamMouthOpenY', 0.09, PRIO.script, 0.08);
-    this._setParamSmooth('ParamMouthForm', 0.35, PRIO.script, 0.08);
-    setTimeout(() => {
-      this._decayParam('ParamBodyAngleY', 0.05);
-      this._decayParam('ParamAngleY', 0.05);
-      this._decayParam('ParamAngleZ', 0.05);
-      this._decayParam('ParamAngleX', 0.05);
-      this._decayParam('ParamEyeLOpen', 0.06);
-      this._decayParam('ParamEyeROpen', 0.06);
-      this._decayParam('ParamMouthOpenY', 0.05);
-      this._decayParam('ParamMouthForm', 0.05);
-    }, 2600);
-  }
-
-  // 초롱초롱/기대: 눈 번쩍 + 살랑살랑 바운스 + 하트 4개
-  playSparkle() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('sparkle');
-    this._setParamSmooth('ParamEyeLOpen', 1.25, PRIO.script, 0.25);
-    this._setParamSmooth('ParamEyeROpen', 1.25, PRIO.script, 0.25);
-    this._setParamSmooth('ParamBrowLY', 0.5, PRIO.script, 0.2);
-    this._setParamSmooth('ParamBrowRY', 0.5, PRIO.script, 0.2);
-    this._setParamSmooth('ParamCheek', 0.45, PRIO.script, 0.15);
-    this._setParamSmooth('ParamMouthForm', 0.6, PRIO.script, 0.2);
-    this._setParamSmooth('ParamMouthOpenY', 0.22, PRIO.script, 0.18);
-    this._setParamSmooth('ParamBodyAngleY', -5, PRIO.script, 0.12);
-
-    // 살랑살랑
-    let sway = 0;
-    const sTimer = setInterval(() => {
-      sway++;
-      if (sway > 8) {
-        clearInterval(sTimer);
-        this._decayParam('ParamAngleZ', 0.06);
-        this._decayParam('ParamEyeLOpen', 0.06);
-        this._decayParam('ParamEyeROpen', 0.06);
-        this._decayParam('ParamBrowLY', 0.05);
-        this._decayParam('ParamBrowRY', 0.05);
-        this._decayParam('ParamCheek', 0.03);
-        this._decayParam('ParamMouthForm', 0.05);
-        this._decayParam('ParamMouthOpenY', 0.06);
-        this._decayParam('ParamBodyAngleY', 0.05);
-        return;
-      }
-      this._setParam('ParamAngleZ', sway % 2 === 0 ? -7 : 7);
-    }, 180);
-
-    const cp = this.centerPoint();
-    this._spawnHearts(cp.x - 20, cp.y - 50, 2);
-    setTimeout(() => this._spawnHearts(cp.x + 20, cp.y - 60, 2), 400);
-  }
-
-  // 멍때리기/영혼 가출: 초점 풀린 눈으로 멍하니 정지
-  playSpaceOut() {
-    if (!this.model) return;
-    this._lastInteraction = Date.now();
-    this.setEmotionSoft('spaceout');
-    this._setParamSmooth('ParamAngleY', -8, PRIO.script, 0.04);
-    this._setParamSmooth('ParamAngleZ', 4, PRIO.script, 0.04);
-    this._setParamSmooth('ParamBodyAngleY', 3, PRIO.script, 0.03);
-    this._setParamSmooth('ParamEyeLOpen', 0.42, PRIO.script, 0.05);
-    this._setParamSmooth('ParamEyeROpen', 0.42, PRIO.script, 0.05);
-    this._setParamSmooth('ParamBrowLY', 0, PRIO.script, 0.05);
-    this._setParamSmooth('ParamBrowRY', 0, PRIO.script, 0.05);
-    this._setParamSmooth('ParamMouthOpenY', 0.12, PRIO.script, 0.04);
-    this._setParamSmooth('ParamMouthForm', 0, PRIO.script, 0.04);
-    setTimeout(() => {
-      this._decayParam('ParamAngleY', 0.04);
-      this._decayParam('ParamAngleZ', 0.04);
-      this._decayParam('ParamBodyAngleY', 0.04);
-      this._decayParam('ParamEyeLOpen', 0.06);
-      this._decayParam('ParamEyeROpen', 0.06);
-      this._decayParam('ParamMouthOpenY', 0.05);
-    }, 3500);
-  }
+  playExplain() { return this._playReaction('explain'); }
+  playSurprise() { return this._playReaction('surprise'); }
+  playThink() { return this._playReaction('think'); }
+  playJoy() { return this._playReaction('joy'); }
+  playSad() { return this._playReaction('sad'); }
+  playAngry() { return this._playReaction('angry'); }
+  playSleepy() { return this._playReaction('sleepy'); }
+  playWakeUp() { return this._playReaction('wakeup'); }
+  playGreet() { return this._playReaction('greet'); }
+  playShake() { return this._playReaction('shake'); }
+  playWave() { return this._playReaction('wave'); }
+  playClap() { return this._playReaction('clap'); }
+  playDance() { return this._playReaction('dance'); }
+  playFocus() { return this._playReaction('focus'); }
+  playProud() { return this._playReaction('proud'); }
+  playFighting() { return this._playReaction('fighting'); }
+  playShy() { return this._playReaction('shy'); }
+  playPanic() { return this._playReaction('panic'); }
+  playCurious() { return this._playReaction('curious'); }
+  playDozeOff() { return this._playReaction('dozeoff'); }
+  playRelieved() { return this._playReaction('relieved'); }
+  playPout() { return this._playReaction('pout'); }
+  playWhisper() { return this._playReaction('whisper'); }
+  playSparkle() { return this._playReaction('sparkle'); }
+  playSpaceOut() { return this._playReaction('spaceout'); }
+  playNod() { return this._playReaction('nod'); }
 
   // 상황별 모션 통합 디스패처 (이름으로 직접 실행)
   playSituation(name) {
     if (!name || !this.model) return false;
-    const map = {
-      nod: () => this.playNod(),
-      think: () => this.playThink(),
-      surprise: () => this.playSurprise(),
-      joy: () => this.playJoy(),
-      sad: () => this.playSad(),
-      angry: () => this.playAngry(),
-      sleepy: () => this.playSleepy(),
-      wakeup: () => this.playWakeUp(),
-      greet: () => this.playGreet(),
-      shake: () => this.playShake(),
-      wave: () => this.playWave(),
-      clap: () => this.playClap(),
-      dance: () => this.playDance(),
-      explain: () => this.playExplain(),
-      focus: () => this.playFocus(),
-      proud: () => this.playProud(),
-      fighting: () => this.playFighting(),
-      shy: () => this.playShy(),
-      panic: () => this.playPanic(),
-      curious: () => this.playCurious(),
-      dozeoff: () => this.playDozeOff(),
-      relieved: () => this.playRelieved(),
-      pout: () => this.playPout(),
-      whisper: () => this.playWhisper(),
-      sparkle: () => this.playSparkle(),
-      spaceout: () => this.playSpaceOut(),
-    };
-    const fn = map[String(name).toLowerCase()];
-    if (fn) {
-      fn();
-      return true;
-    }
-    return false;
-  }
-
-  // 하트 표시
-  _spawnHearts(x, y, count = 1) {
-    const parent = this.canvas.parentElement;
-    if (!parent) return;
-    const marks = ['💗', '💖', '💕', '✨', '💙'];
-    for (let i = 0; i < count; i++) {
-      if (parent.querySelectorAll('.float-heart').length > 30) return;
-      const el = document.createElement('div');
-      el.className = 'float-heart';
-      el.textContent = marks[Math.floor(Math.random() * marks.length)];
-      el.style.left = `${x + (Math.random() * 56 - 28)}px`;
-      el.style.top = `${y + (Math.random() * 20 - 10)}px`;
-      el.style.fontSize = `${16 + Math.random() * 14}px`;
-      el.addEventListener('animationend', () => el.remove());
-      setTimeout(() => el.remove(), 2200);
-      parent.appendChild(el);
-    }
+    return this._playReaction(String(name).toLowerCase());
   }
 }
